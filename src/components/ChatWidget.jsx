@@ -144,10 +144,10 @@ export default function ChatWidget() {
       ]);
 
       /* Create PaymentIntent */
-      const paymentRes = await fetch("/api/create-payment-intent", {
+      const paymentRes = await fetch("/api/acp/checkout-session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ product: data.product }),
+        body: JSON.stringify({ productId: data.product.id }),
       });
 
       const paymentData = await paymentRes.json();
