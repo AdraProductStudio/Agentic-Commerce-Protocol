@@ -161,18 +161,22 @@ export default function ChatWidget() {
   /* ---------------------------------------
      PAYMENT SUCCESS CALLBACK
   ---------------------------------------- */
-  function handlePaymentSuccess() {
+  async function handlePaymentSuccess() {
+    const res = await fetch("/api/orders/latest");
+    const confirmation = await res.json();
+
     setChat((prev) => [
       ...prev,
       {
         role: "agent",
-        text: "✅ Payment successful! 🎉 Your order is confirmed.",
+        text: `🎉 Order Confirmed!\n\nOrder ID: ${confirmation.order_id}\nDelivery: ${confirmation.delivery}`,
+        // text: `🎉 Order Confirmed!\n\n`,
       },
     ]);
 
     setShowPayment(false);
-    setClientSecret(null);
   }
+
 
   return (
     <>
@@ -223,18 +227,16 @@ export default function ChatWidget() {
             {chat.map((c, i) => (
               <div
                 key={i}
-                className={`d-flex mb-2 ${
-                  c.role === "user"
+                className={`d-flex mb-2 ${c.role === "user"
                     ? "justify-content-end"
                     : "justify-content-start"
-                }`}
+                  }`}
               >
                 <div
-                  className={`p-2 rounded-3 ${
-                    c.role === "user"
+                  className={`p-2 rounded-3 ${c.role === "user"
                       ? "bg-primary text-white"
                       : "bg-white border"
-                  }`}
+                    }`}
                   style={{ maxWidth: "75%" }}
                 >
                   {c.text}
@@ -281,3 +283,4 @@ export default function ChatWidget() {
     </>
   );
 }
+

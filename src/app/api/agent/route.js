@@ -1,15 +1,18 @@
 import OpenAI from "openai";
 import { productsData } from "@/data/productsData";
 
+import Order from "@/models/Order";
+import { connectDB } from "@/lib/mongodb";
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 /* -----------------------------
-   ACP State Memory
+   ACP State Memory (Simple Demo)
 ----------------------------- */
-let pendingOptions = null; // list shown to user
-let selectedProduct = null; // chosen product
+let pendingOptions = null;
+let selectedProduct = null;
 
 /* -----------------------------
    POST Agent Route
@@ -20,7 +23,7 @@ export async function POST(req) {
     const text = message.trim().toLowerCase();
 
     /* -----------------------------
-       Step 0: Greetings
+       ✅ STEP 0: Greetings
     ----------------------------- */
     if (["hi", "hello", "hey"].includes(text)) {
       return Response.json({
@@ -29,45 +32,85 @@ export async function POST(req) {
     }
 
     /* -----------------------------
-   Step 1: ACP Product Selection
-   User must reply with number
------------------------------ */
-if (pendingOptions && !selectedProduct) {
-  const choice = parseInt(text);
+       ✅ STEP 0.5: ORDER TRACKING
+       User: Track ORD_123456
+    ----------------------------- */
+if (text.toLowerCase().includes("track")) {
+  // Ensure uppercase for regex match
+  const match = text.toUpperCase().match(/ORD_\d+/);
 
-  // ✅ Case 1: User picked valid number
-  if (!isNaN(choice) && choice >= 1 && choice <= pendingOptions.length) {
-    selectedProduct = pendingOptions[choice - 1];
-
+  if (!match) {
     return Response.json({
-      reply: `✅ You selected: **${selectedProduct.name}**
-
-Price: $${selectedProduct.price}
-Color: ${selectedProduct.color}
-
-Would you like to proceed to checkout? (Yes/No)`,
+      reply: "❌ Please provide a valid Order ID like:\nTrack ORD_123456",
     });
   }
 
-  // ✅ Case 2: User typed a new query instead of number
-  // Example: "iphone", "show samsung", "under 600"
-  // Reset ACP state so agent can search again
-  pendingOptions = null;
-  selectedProduct = null;
+  const orderId = match[0].trim();
 
-  // ✅ IMPORTANT:
-  // Do NOT return here.
-  // Let the request continue to OpenAI search below.
+  try {
+    await connectDB();
+
+    const order = await Order.findOne({ orderId });
+
+    if (!order) {
+      return Response.json({
+        reply: `❌ Sorry, I could not find any order with ID: ${orderId}`,
+      });
+    }
+
+    return Response.json({
+      reply: `📦 Order Found Successfully!
+
+✅ Order ID: ${order.orderId}
+💳 Payment Status: ${order.paymentStatus}
+🚚 Delivery Status: ${order.status}
+💰 Price: ₹${order.product.price}
+
+Thank you for shopping with us! 🙏`,
+    });
+  } catch (err) {
+    console.error("Track order error:", err);
+    return Response.json({
+      reply: "⚠️ Something went wrong. Please try again.",
+    });
+  }
 }
 
 
+
     /* -----------------------------
-       Step 2: ACP Final Confirmation
+       ✅ STEP 1: ACP Product Selection
+       User replies with number
+    ----------------------------- */
+    if (pendingOptions && !selectedProduct) {
+      const choice = parseInt(text);
+
+      // Valid number selection
+      if (!isNaN(choice) && choice >= 1 && choice <= pendingOptions.length) {
+        selectedProduct = pendingOptions[choice - 1];
+
+        return Response.json({
+          reply: `✅ You selected: **${selectedProduct.name}**
+
+💰 Price: $${selectedProduct.price}
+🎨 Color: ${selectedProduct.color}
+
+Would you like to proceed to checkout? (Yes/No)`,
+        });
+      }
+
+      // User typed new query instead of number → Reset ACP state
+      pendingOptions = null;
+      selectedProduct = null;
+    }
+
+    /* -----------------------------
+       ✅ STEP 2: ACP Final Confirmation
     ----------------------------- */
     if (selectedProduct && text === "yes") {
       const product = selectedProduct;
 
-      // reset state
+      // Reset state after confirmation
       selectedProduct = null;
       pendingOptions = null;
 
@@ -87,7 +130,8 @@ Would you like to proceed to checkout? (Yes/No)`,
     }
 
     /* -----------------------------
-       Step 3: Detect Budget Query
+       ✅ STEP 3: Budget Query Detection
+       Example: under $700
     ----------------------------- */
     let budget = null;
     const budgetMatch = text.match(/under\s*\$?(\d+)/);
@@ -97,8 +141,7 @@ Would you like to proceed to checkout? (Yes/No)`,
     }
 
     /* -----------------------------
-       Step 4: OpenAI Intent Matching
-       Only from Store Products
+       ✅ STEP 4: OpenAI Intent Matching
     ----------------------------- */
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -113,11 +156,6 @@ ONLY recommend products from this list:
 
 ${productsData.map((p) => `${p.name} ($${p.price})`).join("\n")}
 
-User may ask:
-- "samsung"
-- "show samsung mobiles"
-- "suggest under $600"
-
 Return ONLY JSON:
 
 {
@@ -126,8 +164,8 @@ Return ONLY JSON:
 
 Rules:
 - Never suggest products outside the store.
-- If user asks brand like Samsung, return all Samsung products.
-- If user asks budget, return only products within budget.
+- If user asks Samsung, return all Samsung products.
+- If user asks budget, return products within budget.
 `,
         },
         {
@@ -144,14 +182,14 @@ Rules:
     );
 
     /* -----------------------------
-       Step 5: Apply Budget Filter Locally
+       ✅ STEP 5: Apply Budget Filter
     ----------------------------- */
     if (budget !== null) {
       matchedProducts = matchedProducts.filter((p) => p.price <= budget);
     }
 
     /* -----------------------------
-       Step 6: No Matches
+       ✅ STEP 6: No Matches
     ----------------------------- */
     if (matchedProducts.length === 0) {
       return Response.json({
@@ -163,12 +201,12 @@ ${productsData.map((p) => `• ${p.name}`).join("\n")}`,
     }
 
     /* -----------------------------
-       Step 7: Show Options (ACP Start)
+       ✅ STEP 7: Show Options (ACP Begins)
     ----------------------------- */
     pendingOptions = matchedProducts;
     selectedProduct = null;
 
-    let reply = `🛒 Here are the available mobiles:\n\n`;
+    let reply = `🛒 Available Mobiles:\n\n`;
 
     matchedProducts.forEach((p, i) => {
       reply += `${i + 1}. ${p.name} — $${p.price} — ${p.color}\n`;

@@ -1,19 +1,22 @@
-import clientPromise from "@/lib/mongodb";
+import { connectDB } from "@/lib/mongodb";
+import Order from "@/models/Order";
 
 export async function GET() {
-  const client = await clientPromise;
-  const db = client.db();
+  await connectDB();
 
-  const latestOrder = await db
-    .collection("orders")
-    .find()
-    .sort({ createdAt: -1 })
-    .limit(1)
-    .toArray();
+  const latestOrder = await Order.findOne().sort({ createdAt: -1 });
 
-  if (!latestOrder.length) {
-    return Response.json({ error: "No orders yet" }, { status: 404 });
+  if (!latestOrder) {
+    return Response.json(
+      { error: "No orders yet" },
+      { status: 404 }
+    );
   }
 
-  return Response.json(latestOrder[0].confirmation);
+  return Response.json({
+    type: "order_confirmation",
+    order_id: latestOrder.orderId,
+    status: latestOrder.paymentStatus,
+    delivery: latestOrder.status,
+  });
 }

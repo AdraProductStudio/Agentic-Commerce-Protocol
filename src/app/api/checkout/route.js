@@ -10,25 +10,34 @@ export async function POST(req) {
       return Response.json({ error: "Product missing" }, { status: 400 });
     }
 
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
+const session = await stripe.checkout.sessions.create({
+  mode: "payment",
 
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            product_data: {
-              name: product.name,
-            },
-            unit_amount: product.price * 100,
-          },
-          quantity: 1,
+  line_items: [
+    {
+      price_data: {
+        currency: "usd",
+        product_data: {
+          name: product.name,
         },
-      ],
+        unit_amount: product.price * 100,
+      },
+      quantity: 1,
+    },
+  ],
 
-      success_url: "http://localhost:3000/success",
-      cancel_url: "http://localhost:3000/cancel",
-    });
+  // ✅ Save product info inside Stripe
+  metadata: {
+    id: product.id,
+    name: product.name,
+    price: product.price,
+    color: product.color,
+  },
+
+  success_url: "http://localhost:3000/success",
+  cancel_url: "http://localhost:3000/cancel",
+});
+
 
     return Response.json({ url: session.url });
   } catch (err) {

@@ -1,59 +1,48 @@
 import Stripe from "stripe";
-import clientPromise from "@/lib/mongodb";
+import { connectDB } from "@/lib/mongodb";
+import Order from "@/models/Order";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 export async function POST(req) {
+  const body = await req.text();
   const sig = req.headers.get("stripe-signature");
-  const rawBody = await req.text();
 
   let event;
 
   try {
     event = stripe.webhooks.constructEvent(
-      rawBody,
+      body,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
+    console.log("❌ Webhook signature error:", err.message);
     return new Response("Webhook Error", { status: 400 });
   }
 
-  // ✅ Payment Confirmed
+  /* ✅ Payment Success Event */
   if (event.type === "payment_intent.succeeded") {
-    const intent = event.data.object;
+    const paymentIntent = event.data.object;
 
-    const client = await clientPromise;
-    const db = client.db();
+    console.log("✅ Payment succeeded:", paymentIntent.id);
 
-    // Find checkout record
-    const checkout = await db.collection("checkouts").findOne({
-      paymentIntentId: intent.id,
-    });
+    await connectDB();
 
-    if (!checkout) {
-      console.log("❌ Checkout not found for payment:", intent.id);
-      return new Response("Checkout missing", { status: 404 });
-    }
-
-    // ✅ ACP Order Confirmation Object
-    const orderConfirmation = {
-      type: "order_confirmation",
-      order_id: "ORD_" + intent.id.slice(-6),
+    // Generate Order ID
+    const newOrder = await Order.create({
+      orderId: "ORD_" + Date.now(),
+      paymentStatus: "paid",
       status: "confirmed",
-      delivery: "processing",
-    };
-
-    // Save order
-    await db.collection("orders").insertOne({
-      createdAt: new Date(),
-      paymentIntentId: intent.id,
-      productId: checkout.productId,
-      confirmation: orderConfirmation,
+      product: {
+        name: paymentIntent.metadata.productName,
+        price: paymentIntent.amount / 100,
+        color: paymentIntent.metadata.color,
+      },
     });
 
-    console.log("✅ ORDER SAVED:", orderConfirmation);
+    console.log("✅ Order Saved:", newOrder.orderId);
   }
 
-  return new Response("ok", { status: 200 });
+  return Response.json({ received: true });
 }

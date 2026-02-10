@@ -1,17 +1,11 @@
-import { MongoClient } from "mongodb";
+import mongoose from "mongoose";
 
-const uri = process.env.MONGODB_URI;
+export async function connectDB() {
+  if (mongoose.connection.readyState >= 1) {
+    console.log("✅ MongoDB already connected");
+    return;
+  }
 
-if (!uri) throw new Error("❌ Missing MONGODB_URI");
-
-let client;
-let clientPromise;
-
-if (!global._mongoClientPromise) {
-  client = new MongoClient(uri);
-  global._mongoClientPromise = client.connect();
+  await mongoose.connect(process.env.MONGODB_URI);
+  console.log("✅ MongoDB connected");
 }
-
-clientPromise = global._mongoClientPromise;
-
-export default clientPromise;
