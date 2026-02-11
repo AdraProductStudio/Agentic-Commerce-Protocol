@@ -1,30 +1,27 @@
 import mongoose from "mongoose";
 
-const OrderSchema = new mongoose.Schema(
-  {
-    orderId: { type: String, required: true, unique: true },
-
-    product: {
-      id: Number,
+const OrderSchema = new mongoose.Schema({
+  orderId: { type: String, required: true, unique: true },
+  checkout: {
+    session_id: String,
+  },
+  buyer: {
+    first_name: String,
+    last_name: String,
+    email: String,
+  },
+  items: [
+    {
+      id: String,   // ✅ FIX
       name: String,
       price: Number,
-      color: String,
-    },
+      quantity: Number,
+      currency: String,
+    }
+  ],
+  totalPrice: Number,
+  paymentStatus: { type: String, default: "pending" },
+  status: { type: String, default: "pending" },
+}, { timestamps: true });
 
-    status: {
-      type: String,
-      default: "confirmed",
-    },
-
-    paymentStatus: {
-      type: String,
-      default: "paid",
-    },
-
-    stripeSessionId: String,
-  },
-  { timestamps: true }
-);
-
-export default mongoose.models.Order ||
-  mongoose.model("Order", OrderSchema);
+export default mongoose.models.Order || mongoose.model("Order", OrderSchema);

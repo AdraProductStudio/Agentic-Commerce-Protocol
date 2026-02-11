@@ -1,9 +1,12 @@
 "use client";
 
+import { formatCurrency } from "@/lib/formatCurrency";
 import { useCart } from "./CartContext";
 
 export default function ProductCard({ product }) {
   const { addToCart } = useCart();
+
+
 
   return (
     <div className="card h-100 shadow-sm d-flex flex-column">
@@ -27,7 +30,7 @@ export default function ProductCard({ product }) {
         <p className="text-muted small">{product.description}</p>
 
         <p className="mb-0">
-          <b>${product.price}</b> • {product.color}
+          <b>{formatCurrency(product.currency)}{product.price}</b> • {product.color}
         </p>
       </div>
 

@@ -3,6 +3,7 @@ import { productsData } from "@/data/productsData";
 
 import Order from "@/models/Order";
 import { connectDB } from "@/lib/mongodb";
+import { formatCurrency } from "@/lib/formatCurrency";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -35,46 +36,56 @@ export async function POST(req) {
        ✅ STEP 0.5: ORDER TRACKING
        User: Track ORD_123456
     ----------------------------- */
-if (text.toLowerCase().includes("track")) {
-  // Ensure uppercase for regex match
-  const match = text.toUpperCase().match(/ORD_\d+/);
+    if (text.toLowerCase().includes("track")) {
+      // Ensure uppercase for regex match
+      const match = text.toUpperCase().match(/ORD_\d+/);
 
-  if (!match) {
-    return Response.json({
-      reply: "❌ Please provide a valid Order ID like:\nTrack ORD_123456",
-    });
-  }
+      if (!match) {
+        return Response.json({
+          reply: "❌ Please provide a valid Order ID like:\nTrack ORD_123456",
+        });
+      }
 
-  const orderId = match[0].trim();
+      const orderId = match[0].trim();
 
-  try {
-    await connectDB();
+      try {
+        await connectDB();
 
-    const order = await Order.findOne({ orderId });
+        const order = await Order.findOne({ orderId });
 
-    if (!order) {
-      return Response.json({
-        reply: `❌ Sorry, I could not find any order with ID: ${orderId}`,
-      });
-    }
+        if (!order) {
+          return Response.json({
+            reply: `❌ Sorry, I could not find any order with ID: ${orderId}`,
+          });
+        }
 
-    return Response.json({
-      reply: `📦 Order Found Successfully!
+        return Response.json({
+          reply: `📦 Order Found Successfully!
 
 ✅ Order ID: ${order.orderId}
 💳 Payment Status: ${order.paymentStatus}
 🚚 Delivery Status: ${order.status}
-💰 Price: ₹${order.product.price}
+
+🛒 Items Purchased:
+${order.items
+              .map(
+                (i) =>
+                  `• ${i.name} × ${i.quantity} - ${formatCurrency(i.currency)}${i.price * i.quantity}`
+              )
+              .join("\n")}
+
+💰 Total Price: ${formatCurrency(order.items[0]?.currency || "USD")}${order.totalPrice}
 
 Thank you for shopping with us! 🙏`,
-    });
-  } catch (err) {
-    console.error("Track order error:", err);
-    return Response.json({
-      reply: "⚠️ Something went wrong. Please try again.",
-    });
-  }
-}
+        });
+
+      } catch (err) {
+        console.error("Track order error:", err);
+        return Response.json({
+          reply: "⚠️ Something went wrong. Please try again.",
+        });
+      }
+    }
 
 
 
@@ -92,7 +103,7 @@ Thank you for shopping with us! 🙏`,
         return Response.json({
           reply: `✅ You selected: **${selectedProduct.name}**
 
-💰 Price: $${selectedProduct.price}
+💰 Price: ${formatCurrency(selectedProduct.currency)}${selectedProduct.price}
 🎨 Color: ${selectedProduct.color}
 
 Would you like to proceed to checkout? (Yes/No)`,
@@ -154,7 +165,7 @@ You are a store assistant.
 
 ONLY recommend products from this list:
 
-${productsData.map((p) => `${p.name} ($${p.price})`).join("\n")}
+${productsData.map((p) => `${p.name} (${p.currency}${p.price})`).join("\n")}
 
 Return ONLY JSON:
 
@@ -209,7 +220,7 @@ ${productsData.map((p) => `• ${p.name}`).join("\n")}`,
     let reply = `🛒 Available Mobiles:\n\n`;
 
     matchedProducts.forEach((p, i) => {
-      reply += `${i + 1}. ${p.name} — $${p.price} — ${p.color}\n`;
+      reply += `${i + 1}. ${p.name} — ${formatCurrency(p.currency)}${p.price} — ${p.color}\n`;
     });
 
     reply += `\nReply with the product number to continue.`;
