@@ -217,15 +217,27 @@ ${productsData.map((p) => `• ${p.name}`).join("\n")}`,
     pendingOptions = matchedProducts;
     selectedProduct = null;
 
-    let reply = `🛒 Available Mobiles:\n\n`;
+    // let reply = `🛒 Available Mobiles:\n\n`;
 
-    matchedProducts.forEach((p, i) => {
-      reply += `${i + 1}. ${p.name} — ${formatCurrency(p.currency)}${p.price} — ${p.color}\n`;
+    // matchedProducts.forEach((p, i) => {
+    //   reply += `${i + 1}. ${p.name} — ${formatCurrency(p.currency)}${p.price} — ${p.color}\n`;
+    // });
+
+    // reply += `\nReply with the product number to continue.`;
+
+
+    return Response.json({
+      reply: "🛒 Available Mobiles:",
+      products: matchedProducts.map((p) => ({
+        id: p.id,
+        name: p.name,
+        price: p.price,
+        currency: p.currency,
+        color: p.color,
+        image: p.image,
+      })),
     });
 
-    reply += `\nReply with the product number to continue.`;
-
-    return Response.json({ reply });
   } catch (err) {
     console.error("Agent Error:", err);
 
