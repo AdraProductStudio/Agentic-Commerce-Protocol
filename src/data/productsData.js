@@ -96,4 +96,14 @@ export const productsData = [
             "Performance-focused phone with gaming and fast charging.",
         image: "https://fdn2.gsmarena.com/vv/bigpic/realme-gt6.jpg",
     },
+    {
+        id: "prod_poco_f6",
+        name: "POCO F6",
+        price: 28999,
+        currency: "INR",
+        color: "Titanium",
+        description:
+            "Value flagship POCO phone with strong performance and fast charging.",
+        image: "https://fdn2.gsmarena.com/vv/bigpic/xiaomi-poco-f6.jpg",
+    },
 ];

@@ -1,25 +1,27 @@
-import { connectDB } from "@/lib/mongodb";
 import Product from "@/models/Product";
+import { connectDB } from "@/lib/mongodb";
 
 export async function GET(req) {
-  try {
-    await connectDB();
+  await connectDB();
 
-    const { searchParams } = new URL(req.url);
-    const query = searchParams.get("q");
+  const { searchParams } = new URL(req.url);
 
-    if (!query) {
-      return Response.json({ products: [] });
-    }
+  const query = searchParams.get("query") || "";
+  const skip = parseInt(searchParams.get("skip") || "0");
 
-    // Case-insensitive search
-    const products = await Product.find({
-      name: { $regex: query, $options: "i" },
-    });
+  const products = await Product.find({
+    name: { $regex: query, $options: "i" },
+  })
+    .skip(skip)
+    .limit(10);
 
-    return Response.json({ products });
-  } catch (err) {
-    console.error("❌ Product Fetch Error:", err);
-    return Response.json({ error: "Failed to fetch products" }, { status: 500 });
-  }
+  const total = await Product.countDocuments({
+    name: { $regex: query, $options: "i" },
+  });
+
+  return Response.json({
+    products,
+    nextSkip: skip + 10,
+    hasMore: skip + 10 < total,
+  });
 }
