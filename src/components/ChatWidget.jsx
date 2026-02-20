@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { loadStripe } from "@stripe/stripe-js";
 import {
   Elements,
-  PaymentElement,
+  CardElement,
   useStripe,
   useElements,
 } from "@stripe/react-stripe-js";
@@ -15,6 +15,21 @@ const stripePromise = loadStripe(
   process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY
 );
 const AGENT_LOADING_TEXT = "Thinking...";
+const ACP_API_VERSION = process.env.NEXT_PUBLIC_ACP_API_VERSION || "2026-01-30";
+const ACP_PUBLIC_SECRET = process.env.NEXT_PUBLIC_ACP_SECRET_KEY;
+
+function buildAcpHeaders(hasJsonBody = false) {
+  const headers = {
+    "API-Version": ACP_API_VERSION,
+  };
+  if (hasJsonBody) {
+    headers["Content-Type"] = "application/json";
+  }
+  if (ACP_PUBLIC_SECRET) {
+    headers.Authorization = `Bearer ${ACP_PUBLIC_SECRET}`;
+  }
+  return headers;
+}
 
 /* ---------------- Stripe Checkout Form ---------------- */
 function CheckoutForm({ onSuccess }) {
@@ -31,16 +46,23 @@ function CheckoutForm({ onSuccess }) {
 
     setLoading(true);
 
-    const result = await stripe.confirmPayment({
-      elements,
-      redirect: "if_required",
+    const cardElement = elements.getElement(CardElement);
+    if (!cardElement) {
+      setErrorMsg("Card form is not ready yet.");
+      setLoading(false);
+      return;
+    }
+
+    const result = await stripe.createPaymentMethod({
+      type: "card",
+      card: cardElement,
     });
 
-    if (result.error) {
-      setErrorMsg(result.error.message);
+    if (result.error || !result.paymentMethod) {
+      setErrorMsg(result.error?.message || "Unable to create payment method.");
     } else {
       setErrorMsg("");
-      onSuccess();
+      onSuccess(result.paymentMethod.id);
     }
 
     setLoading(false);
@@ -48,7 +70,16 @@ function CheckoutForm({ onSuccess }) {
 
   return (
     <form onSubmit={handlePayment}>
-      <PaymentElement />
+      <CardElement
+        options={{
+          hidePostalCode: true,
+          style: {
+            base: {
+              fontSize: "16px",
+            },
+          },
+        }}
+      />
 
       {errorMsg && (
         <div className="alert alert-danger mt-2 p-2">{errorMsg}</div>
@@ -101,9 +132,12 @@ export default function ChatWidget() {
     postal_code: "",
   });
 
-  const [clientSecret, setClientSecret] = useState(null);
   const [showPayment, setShowPayment] = useState(false);
   const [checkoutSessionId, setCheckoutSessionId] = useState(null);
+  const checkoutSessionIdRef = useRef(null);
+  const [checkoutItems, setCheckoutItems] = useState([]);
+  const [checkoutPricing, setCheckoutPricing] = useState(null);
+  const [isCheckoutSessionUpdating, setIsCheckoutSessionUpdating] = useState(false);
 
 
 
@@ -115,9 +149,196 @@ export default function ChatWidget() {
 
 
   const chatEndRef = useRef(null);
+  const messageInputRef = useRef(null);
 
   function getProductId(product) {
     return product?.id ?? product?._id ?? null;
+  }
+
+  function syncCartFromCheckoutItems(items) {
+    setCart((prev) => {
+      const prevMap = new Map(prev.map((item) => [String(item.id), item]));
+      return items.map((item) => {
+        const existing = prevMap.get(String(item.id)) || {};
+        return {
+          ...existing,
+          id: String(item.id),
+          name: item.name || existing.name,
+          price: item.unit_price ?? existing.price ?? 0,
+          quantity: item.quantity,
+          currency: item.currency || existing.currency || "USD",
+        };
+      });
+    });
+  }
+
+  async function refreshCheckoutSession() {
+    const sessionId = (checkoutSessionIdRef.current || checkoutSessionId || "").trim();
+    if (!sessionId) return;
+    console.log("[ChatWidget] GET /api/acp/checkout_sessions/:id", { sessionId });
+
+    setIsCheckoutSessionUpdating(true);
+    try {
+      const res = await fetch(
+        `/api/acp/checkout_sessions/${encodeURIComponent(sessionId)}`,
+        {
+          headers: buildAcpHeaders(),
+        }
+      );
+      const data = await res.json();
+
+      if (!res.ok) {
+        setChat((prev) => [
+          ...prev,
+          { role: "agent", text: `❌ Unable to refresh checkout: ${data.error}` },
+        ]);
+        return;
+      }
+
+      const session = data.checkout_session || {};
+      const items = session.items || [];
+      setCheckoutItems(items);
+      setCheckoutPricing(session.pricing || null);
+      syncCartFromCheckoutItems(items);
+    } catch {
+      setChat((prev) => [
+        ...prev,
+        { role: "agent", text: "❌ Unable to refresh checkout right now." },
+      ]);
+    } finally {
+      setIsCheckoutSessionUpdating(false);
+    }
+  }
+
+  async function updateCheckoutItems(nextItems) {
+    const sessionId = (checkoutSessionIdRef.current || checkoutSessionId || "").trim();
+    if (!sessionId || nextItems.length === 0) return;
+    console.log("[ChatWidget] POST /api/acp/checkout_sessions/:id", {
+      sessionId,
+      items: nextItems.map((item) => ({ id: String(item.id), quantity: item.quantity })),
+    });
+
+    setIsCheckoutSessionUpdating(true);
+    try {
+      const res = await fetch(`/api/acp/checkout_sessions/${encodeURIComponent(sessionId)}`, {
+        method: "POST",
+        headers: buildAcpHeaders(true),
+        body: JSON.stringify({
+          items: nextItems.map((item) => ({
+            id: String(item.id),
+            quantity: item.quantity,
+          })),
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setChat((prev) => [
+          ...prev,
+          { role: "agent", text: `❌ Unable to update checkout: ${data.error}` },
+        ]);
+        return;
+      }
+
+      const session = data.checkout_session || {};
+      const items = session.items || [];
+      setCheckoutItems(items);
+      setCheckoutPricing(session.pricing || null);
+      syncCartFromCheckoutItems(items);
+    } catch {
+      setChat((prev) => [
+        ...prev,
+        { role: "agent", text: "❌ Unable to update checkout right now." },
+      ]);
+    } finally {
+      setIsCheckoutSessionUpdating(false);
+    }
+  }
+
+  function changeCheckoutItemQuantity(itemId, delta) {
+    if (isCheckoutSessionUpdating) return;
+    const nextItems = checkoutItems
+      .map((item) =>
+        String(item.id) === String(itemId)
+          ? { ...item, quantity: Math.max(1, item.quantity + delta) }
+          : item
+      );
+
+    updateCheckoutItems(nextItems);
+  }
+
+  function buildCheckoutSummary(items) {
+    if (!items || items.length === 0) {
+      return {
+        totalQuantity: 0,
+        totalPrice: 0,
+        currency: "USD",
+        text: "❌ No items found for checkout.",
+      };
+    }
+
+    const currency = items[0]?.currency || "USD";
+    const totalQuantity = items.reduce(
+      (sum, item) => sum + (Number(item.quantity) || 0),
+      0
+    );
+    const totalPrice = items.reduce(
+      (sum, item) => sum + (Number(item.price) || 0) * (Number(item.quantity) || 0),
+      0
+    );
+
+    const itemsText = items
+      .map((item) => {
+        const quantity = Number(item.quantity) || 0;
+        const unitPrice = Number(item.price) || 0;
+        const lineTotal = unitPrice * quantity;
+        const symbol = formatCurrency(item.currency || currency);
+        return `• ${item.name}
+  Unit Price: ${symbol}${unitPrice}
+  Quantity: ${quantity}
+  Line Total: ${symbol}${lineTotal}`;
+      })
+      .join("\n\n");
+
+    return {
+      totalQuantity,
+      totalPrice,
+      currency,
+      text: `🛒 Items to Purchase:
+${itemsText}
+
+🔢 Total Quantity: ${totalQuantity}
+💰 Total Price: ${formatCurrency(currency)}${totalPrice}
+
+Reply "Yes" to continue checkout or "No" to cancel.`,
+    };
+  }
+
+  function startCheckoutConfirmation(items, mode) {
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      id: getProductId(item),
+      quantity: Number(item.quantity) || 1,
+    }));
+
+    const invalidItem = normalizedItems.find((item) => !item.id);
+    if (invalidItem || normalizedItems.length === 0) {
+      setChat((prev) => [
+        ...prev,
+        { role: "agent", text: "❌ Unable to start checkout. Item data is invalid." },
+      ]);
+      return;
+    }
+
+    if (mode === "BUY_NOW") {
+      selectedProductRef.current = normalizedItems[0];
+      setSelectedProduct(normalizedItems[0]);
+    }
+
+    const summary = buildCheckoutSummary(normalizedItems);
+    setCheckoutMode(mode);
+    setChat((prev) => [...prev, { role: "agent", text: summary.text }]);
+    setCheckoutStep("checkout_confirm");
   }
 
   /* Auto Scroll */
@@ -130,6 +351,12 @@ export default function ChatWidget() {
     }, 100);
   }, [chat, showPayment]);
 
+  useEffect(() => {
+    if (!isAgentLoading) {
+      messageInputRef.current?.focus();
+    }
+  }, [isAgentLoading]);
+
   /* ---------------- Send Message ---------------- */
 
   /* ---------------- Load More Products ---------------- */
@@ -139,6 +366,7 @@ export default function ChatWidget() {
     setLoadingMore(true);
 
     try {
+      console.log("[ChatWidget] GET /api/products", { query: lastQuery, skip });
       const res = await fetch(
         `/api/products?query=${lastQuery}&skip=${skip}`
       );
@@ -198,12 +426,27 @@ export default function ChatWidget() {
     /* Checkout Form Input Mode */
     if (checkoutStep) {
       handleCheckoutInput(userMsg);
+      messageInputRef.current?.focus();
+      return;
+    }
+
+    const normalizedInput = userMsg.trim().toLowerCase();
+    const isCancelCommand =
+      normalizedInput === "cancel" ||
+      normalizedInput === "cancel checkout" ||
+      normalizedInput === "stop checkout" ||
+      normalizedInput === "abort checkout";
+
+    if (showPayment && isCancelCommand) {
+      await cancelActiveCheckout();
+      messageInputRef.current?.focus();
       return;
     }
 
     /* Normal Agent Message */
     try {
       setIsAgentLoading(true);
+      console.log("[ChatWidget] POST /api/agent", { message: userMsg });
 
       const res = await fetch("/api/agent", {
         method: "POST",
@@ -240,19 +483,7 @@ export default function ChatWidget() {
 
       /* Start Checkout */
       if (data.action === "CHECKOUT") {
-
-        // ✅ Save instantly in REF (MOST IMPORTANT)
-        selectedProductRef.current = data.product;
-
-        // Optional UI state
-        setSelectedProduct(data.product);
-
-        setChat(prev => [
-          ...prev,
-          { role: "agent", text: "🧾 Before checkout, please enter First Name:" }
-        ]);
-
-        setCheckoutStep("first_name");
+        startCheckoutConfirmation([{ ...data.product, quantity: 1 }], "BUY_NOW");
       }
     } catch (err) {
       console.error("Agent fetch error:", err);
@@ -269,6 +500,37 @@ export default function ChatWidget() {
 
   /* ---------------- Checkout Input Flow ---------------- */
   function handleCheckoutInput(input) {
+    const normalizedInput = input.trim().toLowerCase();
+
+    if (checkoutStep === "checkout_confirm") {
+      if (["yes", "y"].includes(normalizedInput)) {
+        setChat((prev) => [
+          ...prev,
+          { role: "agent", text: "🧾 Before checkout, please enter First Name:" },
+        ]);
+        setCheckoutStep("first_name");
+        return;
+      }
+
+      if (["no", "n"].includes(normalizedInput)) {
+        setChat((prev) => [
+          ...prev,
+          { role: "agent", text: "❌ Checkout cancelled." },
+        ]);
+        setCheckoutStep(null);
+        setCheckoutMode(null);
+        selectedProductRef.current = null;
+        setSelectedProduct(null);
+        return;
+      }
+
+      setChat((prev) => [
+        ...prev,
+        { role: "agent", text: 'Please reply with "Yes" or "No".' },
+      ]);
+      return;
+    }
+
     const nextStepMap = {
       first_name: "last_name",
       last_name: "email",
@@ -280,10 +542,11 @@ export default function ChatWidget() {
       postal_code: null,
     };
 
-    setBuyerData((prev) => ({
-      ...prev,
+    const updatedBuyerData = {
+      ...buyerData,
       [checkoutStep]: input,
-    }));
+    };
+    setBuyerData(updatedBuyerData);
 
     const nextStep = nextStepMap[checkoutStep];
 
@@ -323,7 +586,7 @@ export default function ChatWidget() {
         itemsToBuy = cart;
       }
 
-      createCheckoutSession(itemsToBuy);
+      createCheckoutSession(itemsToBuy, updatedBuyerData);
     }
 
 
@@ -403,12 +666,7 @@ export default function ChatWidget() {
   /* ----------------Start checkout Session ---------------- */
 
   function startCheckout() {
-    setChat((prev) => [
-      ...prev,
-      { role: "agent", text: "🧾 Enter First Name to Checkout:" },
-    ]);
-
-    setCheckoutStep("first_name");
+    startCheckoutConfirmation(cart, "CART");
   }
 
 
@@ -417,18 +675,7 @@ export default function ChatWidget() {
   /* ----------------Add Buy Now (Direct Checkout)---------------- */
 
   function buyNow(product) {
-    selectedProductRef.current = product;
-
-    setChat((prev) => [
-      ...prev,
-      {
-        role: "agent",
-        text: `⚡ Buying ${product.name} now!\nEnter First Name:`,
-      },
-    ]);
-
-    setCheckoutMode("BUY_NOW");
-    setCheckoutStep("first_name");
+    startCheckoutConfirmation([{ ...product, quantity: 1 }], "BUY_NOW");
   }
 
 
@@ -443,13 +690,7 @@ export default function ChatWidget() {
       return;
     }
 
-    setChat((prev) => [
-      ...prev,
-      { role: "agent", text: "💳 Checking out cart items!\nEnter First Name:" },
-    ]);
-
-    setCheckoutMode("CART");
-    setCheckoutStep("first_name");
+    startCheckoutConfirmation(cart, "CART");
   }
 
 
@@ -458,7 +699,7 @@ export default function ChatWidget() {
 
   /* ---------------- Create Checkout Session ---------------- */
   /* ---------------- Create Checkout Session ---------------- */
-  async function createCheckoutSession(itemsToBuy) {
+  async function createCheckoutSession(itemsToBuy, buyerInfo = buyerData) {
     try {
       console.log("✅ Items Going for Checkout:", itemsToBuy);
 
@@ -473,35 +714,36 @@ export default function ChatWidget() {
       // ACP Payload
       const acpPayload = {
         buyer: {
-          first_name: buyerData.first_name,
-          last_name: buyerData.last_name,
-          email: buyerData.email,
+          first_name: buyerInfo.first_name,
+          last_name: buyerInfo.last_name,
+          email: buyerInfo.email,
         },
 
         items: itemsToBuy.map((item) => ({
           id: item.id,
-          name: item.name,
-          price: item.price,
           quantity: item.quantity || 1,
-          currency: item.currency,
         })),
 
         fulfillment_address: {
-          name: buyerData.first_name + " " + buyerData.last_name,
-          line_one: buyerData.address,
-          city: buyerData.city,
-          state: buyerData.state,
-          country: buyerData.country,
-          postal_code: buyerData.postal_code,
+          name: buyerInfo.first_name + " " + buyerInfo.last_name,
+          line_one: buyerInfo.address,
+          city: buyerInfo.city,
+          state: buyerInfo.state,
+          country: buyerInfo.country,
+          postal_code: buyerInfo.postal_code,
         },
       };
 
       console.log("📦 ACP Payload Sent:", acpPayload);
+      console.log("[ChatWidget] POST /api/acp/checkout_sessions", {
+        itemCount: acpPayload.items.length,
+        buyerEmail: acpPayload.buyer.email,
+      });
 
       // Call backend
-      const res = await fetch("/api/checkout/start", {
+      const res = await fetch("/api/acp/checkout_sessions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: buildAcpHeaders(true),
         body: JSON.stringify(acpPayload),
       });
 
@@ -537,9 +779,14 @@ export default function ChatWidget() {
         return;
       }
 
-      // ✅ Save session + client secret
-      setCheckoutSessionId(sessionId);
-      setClientSecret(paymentData.clientSecret);
+      // ✅ Save session id
+      const rawSessionId = String(sessionId);
+      const extractedSessionId = rawSessionId.match(/cs_\d+/)?.[0];
+      const normalizedSessionId = (extractedSessionId || rawSessionId).trim();
+      checkoutSessionIdRef.current = normalizedSessionId;
+      setCheckoutSessionId(normalizedSessionId);
+      setCheckoutItems(paymentData.checkout_session?.items || []);
+      setCheckoutPricing(paymentData.checkout_session?.pricing || null);
 
       setShowPayment(true);
 
@@ -557,16 +804,88 @@ export default function ChatWidget() {
     }
   }
 
+  async function cancelActiveCheckout() {
+    const sessionId = (
+      checkoutSessionIdRef.current ||
+      checkoutSessionId ||
+      ""
+    ).trim();
+
+    if (!sessionId) {
+      setShowPayment(false);
+      setCheckoutStep(null);
+      setCheckoutMode(null);
+      setSelectedProduct(null);
+      selectedProductRef.current = null;
+      setCheckoutItems([]);
+      setCheckoutPricing(null);
+      return;
+    }
+
+    setIsCheckoutSessionUpdating(true);
+    try {
+      console.log("[ChatWidget] POST /api/acp/checkout_sessions/:id/cancel", {
+        sessionId,
+      });
+      const res = await fetch(
+        `/api/acp/checkout_sessions/${encodeURIComponent(sessionId)}/cancel`,
+        {
+          method: "POST",
+          headers: buildAcpHeaders(),
+        }
+      );
+
+      const cancelData = await res.json();
+
+      if (!res.ok) {
+        setChat((prev) => [
+          ...prev,
+          {
+            role: "agent",
+            text: `❌ Unable to cancel checkout: ${cancelData.error || "Unknown error"}`,
+          },
+        ]);
+        return;
+      }
+
+      setChat((prev) => [
+        ...prev,
+        { role: "agent", text: "❌ Checkout cancelled successfully." },
+      ]);
+    } catch (err) {
+      console.error("❌ Cancel Checkout Error:", err);
+      setChat((prev) => [
+        ...prev,
+        { role: "agent", text: "❌ Unable to cancel checkout right now." },
+      ]);
+    } finally {
+      setShowPayment(false);
+      setCheckoutStep(null);
+      setCheckoutMode(null);
+      setSelectedProduct(null);
+      selectedProductRef.current = null;
+      setCheckoutSessionId(null);
+      checkoutSessionIdRef.current = null;
+      setCheckoutItems([]);
+      setCheckoutPricing(null);
+      setIsCheckoutSessionUpdating(false);
+    }
+  }
+
 
 
 
   /* ---------------- Payment Success ---------------- */
-  /* ---------------- Payment Success ---------------- */
-  async function handlePaymentSuccess() {
+  async function handlePaymentSuccess(paymentToken) {
     setShowPayment(false);
+    const sessionId = (
+      checkoutSessionIdRef.current ||
+      checkoutSessionId ||
+      ""
+    ).trim();
 
     // ✅ Ensure session exists
-    if (!checkoutSessionId) {
+    if (!sessionId) {
       setChat((prev) => [
         ...prev,
         { role: "agent", text: "❌ Session missing. Cannot confirm order." },
@@ -580,11 +899,29 @@ export default function ChatWidget() {
     ]);
 
     try {
-      const res = await fetch("/api/orders/confirm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: checkoutSessionId }),
+      console.log("[ChatWidget] POST /api/acp/checkout_sessions/:id/complete", {
+        sessionId,
+        provider: "stripe",
       });
+      const res = await fetch(
+        `/api/acp/checkout_sessions/${encodeURIComponent(sessionId)}/complete`,
+        {
+          method: "POST",
+          headers: buildAcpHeaders(true),
+          body: JSON.stringify({
+            checkout_session_id: sessionId,
+            buyer: {
+              first_name: buyerData.first_name,
+              last_name: buyerData.last_name,
+              email: buyerData.email,
+            },
+            payment_data: {
+              token: paymentToken,
+              provider: "stripe",
+            },
+          }),
+        }
+      );
 
       const orderData = await res.json();
 
@@ -592,47 +929,75 @@ export default function ChatWidget() {
 
       // ✅ Handle backend confirm error
       if (!res.ok) {
+        const detailedMsg = orderData.messages?.[0]?.text;
         setChat((prev) => [
           ...prev,
           {
             role: "agent",
-            text: "❌ Order confirmation failed: " + orderData.error,
+            text:
+              "❌ Order confirmation failed: " +
+              (detailedMsg || orderData.error || "Unknown error"),
           },
         ]);
         return;
       }
 
-      // ✅ Currency Symbol Fix
-      const currencySymbol = formatCurrency(orderData.currency || "INR");
+      // ✅ Currency + Totals
+      const order = orderData.order || {};
+      const items = order.items || [];
+      const currency = order.currency || items[0]?.currency || "INR";
+      const currencySymbol = formatCurrency(currency);
+      const totalQuantity = items.reduce(
+        (sum, i) => sum + (Number(i.quantity) || 0),
+        0
+      );
+      const calculatedTotalPrice = items.reduce(
+        (sum, i) => sum + (Number(i.price) || 0) * (Number(i.quantity) || 0),
+        0
+      );
+      const totalPrice =
+        calculatedTotalPrice > 0
+          ? calculatedTotalPrice
+          : Number(order.total_price) || 0;
 
       // ✅ Items Purchased Text
       const itemsText =
-        orderData.items?.length > 0
-          ? orderData.items
-            .map(
-              (i) =>
-                `• ${i.name} × ${i.quantity} - ${currencySymbol}${i.price * i.quantity
-                }`
-            )
-            .join("\n")
+        items.length > 0
+          ? items
+            .map((i) => {
+              const quantity = Number(i.quantity) || 0;
+              const unitPrice = Number(i.price) || 0;
+              const lineTotal = unitPrice * quantity;
+              const symbol = formatCurrency(i.currency || currency);
+              return `• ${i.name}
+  Unit Price: ${symbol}${unitPrice}
+  Quantity: ${quantity}
+  Line Total: ${symbol}${lineTotal}`;
+            })
+            .join("\n\n")
           : "No items found";
 
       // ✅ Final Message
       const orderMessage = `🎉 Order Confirmed!
 
-🆔 Order ID: ${orderData.order_id}
-💳 Payment: ${orderData.payment_status}
-🚚 Delivery: ${orderData.delivery_status}
+🆔 Order ID: ${order.id}
+💳 Payment: ${order.payment_status}
+🚚 Delivery: ${order.delivery_status}
 
 🛒 Items Purchased:
 ${itemsText}
 
-💰 Total: ${currencySymbol}${orderData.total_price}`;
+🔢 Total Quantity: ${totalQuantity}
+💰 Total Price: ${currencySymbol}${totalPrice}`;
 
       setChat((prev) => [...prev, { role: "agent", text: orderMessage }]);
 
       // ✅ Clear Cart after successful payment
       setCart([]);
+      setCheckoutItems([]);
+      setCheckoutPricing(null);
+      setCheckoutSessionId(null);
+      checkoutSessionIdRef.current = null;
     } catch (err) {
       console.error("❌ Confirm Order Error:", err);
 
@@ -692,257 +1057,331 @@ ${itemsText}
               zIndex: 9998,
             }}
           >
-          <div className="card-header bg-dark text-white fw-bold w-100 d-flex justify-content-between align-items-center px-3">
+            <div className="card-header bg-dark text-white fw-bold w-100 d-flex justify-content-between align-items-center px-3">
 
-            {/* Left Side Title */}
-            <div className="d-flex align-items-center">
-              🤖 Shopping Assistant
-            </div>
+              {/* Left Side Title */}
+              <div className="d-flex align-items-center">
+                🤖 Shopping Assistant
+              </div>
 
-            {/* Right Side Buttons */}
-            <div className="d-flex align-items-center gap-2">
-              <button
-                type="button"
-                title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-                className="btn btn-sm btn-outline-light"
-                onClick={() => setIsFullscreen((prev) => !prev)}
-              >
-                {isFullscreen ? "🗗" : "⛶"}
-              </button>
-
-              {/* ✅ Show Cart Button ONLY when menu is closed */}
-              {!showCartMenu && (
+              {/* Right Side Buttons */}
+              <div className="d-flex align-items-center gap-2">
                 <button
                   type="button"
-                  title="Cart"
-
-                  className="btn btn-sm btn-warning position-relative d-flex align-items-center justify-content-center"
-                  onClick={() => {
-                    if (cart.length === 0) return;
-                    setShowCartMenu(true);
-                  }}
+                  title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                  className="btn btn-sm btn-outline-light"
+                  onClick={() => setIsFullscreen((prev) => !prev)}
                 >
-                  🛒
-
-                  {/* Badge */}
-                  <span className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
-                    {cart.length}
-                  </span>
+                  {isFullscreen ? "🗗" : "⛶"}
                 </button>
-              )}
 
-              {/* ✅ Show ONLY View + Checkout when menu is open */}
-              {showCartMenu && (
-                <div className="d-flex align-items-center gap-2">
-
-                  {/* View Button */}
+                {/* ✅ Show Cart Button ONLY when menu is closed */}
+                {!showCartMenu && (
                   <button
-                    title="View cart"
-                    className="btn btn-sm btn-light px-3"
+                    type="button"
+                    title="Cart"
+
+                    className="btn btn-sm btn-warning position-relative d-flex align-items-center justify-content-center"
                     onClick={() => {
-                      viewCart();
-                      setShowCartMenu(false); // close after click
+                      if (cart.length === 0) return;
+                      setShowCartMenu(true);
                     }}
                   >
                     🛒
-                  </button>
 
-                  {/* Checkout Button */}
-                  <button
-                    className="btn btn-sm btn-success px-3"
-                    onClick={() => {
-                      checkoutCart();
-                      setShowCartMenu(false); // close after click
-                    }}
-                    disabled={cart.length === 0}
-                    title="Checkout cart"
-                  >
-                    Checkout
+                    {/* Badge */}
+                    <span className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
+                      {cart.length}
+                    </span>
                   </button>
+                )}
 
-                  {/* Optional Close Button */}
-                  {/* <button
-                  title="Close options"
-                    className="btn btn-sm btn-danger text-light px-2"
-                    onClick={() => setShowCartMenu(false)}
-                  >
-                    ✖
-                  </button> */}
-                </div>
-              )}
+                {/* ✅ Show ONLY View + Checkout when menu is open */}
+                {showCartMenu && (
+                  <div className="d-flex align-items-center gap-2">
+
+                    {/* View Button */}
+                    <button
+                      title="View cart"
+                      className="btn btn-sm btn-light px-3"
+                      onClick={() => {
+                        viewCart();
+                        setShowCartMenu(false); // close after click
+                      }}
+                    >
+                      🛒
+                    </button>
+
+                    {/* Checkout Button */}
+                    <button
+                      className="btn btn-sm btn-success px-3"
+                      onClick={() => {
+                        checkoutCart();
+                        setShowCartMenu(false); // close after click
+                      }}
+                      disabled={cart.length === 0}
+                      title="Checkout cart"
+                    >
+                      Checkout
+                    </button>
+
+                  </div>
+                )}
+              </div>
+
             </div>
 
-          </div>
 
 
 
 
-
-          <div
-            className="card-body bg-light"
-            style={{ overflowY: "auto", flex: 1, minHeight: 0 }}
-          >
-            {chat.map((c, i) => (
-              <div key={c.id ?? `chat-${i}`}>
-                {/* Normal Message */}
-                <div
-                  className={`d-flex mb-2 ${c.role === "user"
-                    ? "justify-content-end"
-                    : "justify-content-start"
-                    }`}
-                >
-                  <div style={{ maxWidth: "75%" }}>
-                    <div
-                      className={`p-2 rounded-3 ${c.role === "user"
-                        ? "bg-primary text-white"
-                        : "bg-white border"
-                        }`}
-                      style={{ whiteSpace: "pre-line" }}
-                    >
-                      {c.text}
-                    </div>
-
-                    {c.showCheckoutButton && (
-                      <button
-                        type="button"
-                        className="btn btn-success btn-sm mt-2"
-                        onClick={checkoutCart}
-                      >
-                        Checkout
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Product List */}
-                {c.products?.length > 0 && (
-                  <div className="d-flex flex-wrap gap-2 mb-2">
-                    {c.products.map((p, pi) => {
-                      const productId = getProductId(p);
-                      const inCart = !!productId && cart.some((item) => item.id === productId);
-                      const productKey = `product-${c.id ?? i}-${productId ?? "no-id"}-${pi}`;
-                      const productCurrencySymbol =
-                        p.currency_symbol || formatCurrency(p.currency || "INR");
-
-                      return (
-                        <div
-                          key={productKey}
-                          className="border rounded p-2 bg-white text-center"
-                          style={{
-                            width: isFullscreen ? "clamp(180px, 30%, 260px)" : "75%",
-                            flexGrow: isFullscreen ? 1 : 0,
-                          }}
-                        >
-                          <img
-                            src={p.image}
-                            alt={p.name}
-                            style={{
-                              width: "100%",
-                              maxWidth: "140px",
-                              aspectRatio: "1 / 1",
-                              objectFit: "cover",
-                              borderRadius: "10px",
-                            }}
-                          />
-
-                          <h6 className="mt-2">{p.name}</h6>
-
-                          <p className="fw-bold text-success">
-                            {productCurrencySymbol}{p.price}
-                          </p>
-
-                          <div className="d-flex gap-2">
-                            <button
-                              className={`btn btn-sm w-50 ${inCart ? "btn-danger" : "btn-outline-primary"
-                                }`}
-                              onClick={() => {
-                                if (inCart) {
-                                  removeFromCart(productId);
-                                } else {
-                                  addToCart(p);
-                                }
-                              }}
-                            >
-                              {inCart ? "❌ Remove" : "🛒 Add"}
-                            </button>
-
-                            <button
-                              className="btn btn-sm btn-success w-50"
-                              onClick={() => buyNow(p)}
-                            >
-                              ⚡ Buy
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {/* ✅ Load More Button */}
-                {i === chat.length - 1 && hasMore && (
-                  <div className="text-center mt-2">
-                    <button
-                      className="btn btn-outline-dark btn-sm"
-                      onClick={loadMoreProducts}
-                      disabled={loadingMore}
-                    >
-                      {loadingMore ? "Loading..." : "Load More Products"}
-                    </button>
-                  </div>
-                )}
-
-
-              </div>
-            ))}
-
-            {isAgentLoading && (
-              <div className="d-flex mb-2 justify-content-start">
-                <div style={{ maxWidth: "75%" }}>
-                  <div className="p-2 rounded-3 bg-white border">
-                    {AGENT_LOADING_TEXT}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {showPayment && clientSecret && (
-              <div className="mt-3 p-2 bg-white border rounded">
-                <Elements
-                  stripe={stripePromise}
-                  options={{ clientSecret }}
-                >
-                  <CheckoutForm onSuccess={handlePaymentSuccess} />
-                </Elements>
-              </div>
-            )}
-
-
-
-
-            <div ref={chatEndRef} />
-          </div>
-
-          <div className="card-footer d-flex gap-2">
-            <input
-              value={msg}
-              onChange={(e) => setMsg(e.target.value)}
-              className="form-control"
-              placeholder="Type..."
-              disabled={isAgentLoading}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") sendMessage();
-              }}
-            />
-
-            <button
-              className="btn btn-dark"
-              onClick={sendMessage}
-              disabled={!msg.trim() || isAgentLoading}
+            <div
+              className="card-body bg-light"
+              style={{ overflowY: "auto", flex: 1, minHeight: 0 }}
             >
-              ➤
-            </button>
-          </div>
+              {chat.map((c, i) => (
+                <div key={c.id ?? `chat-${i}`}>
+                  {/* Normal Message */}
+                  <div
+                    className={`d-flex mb-2 ${c.role === "user"
+                      ? "justify-content-end"
+                      : "justify-content-start"
+                      }`}
+                  >
+                    <div style={{ maxWidth: "75%" }}>
+                      <div
+                        className={`p-2 rounded-3 ${c.role === "user"
+                          ? "bg-primary text-white"
+                          : "bg-white border"
+                          }`}
+                        style={{ whiteSpace: "pre-line" }}
+                      >
+                        {c.text}
+                      </div>
+
+                      {c.showCheckoutButton && (
+                        <button
+                          type="button"
+                          className="btn btn-success btn-sm mt-2"
+                          onClick={checkoutCart}
+                        >
+                          Checkout
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Product List */}
+                  {c.products?.length > 0 && (
+                    <div className="d-flex flex-wrap gap-2 mb-2">
+                      {c.products.map((p, pi) => {
+                        const productId = getProductId(p);
+                        const inCart = !!productId && cart.some((item) => item.id === productId);
+                        const productKey = `product-${c.id ?? i}-${productId ?? "no-id"}-${pi}`;
+                        const productCurrencySymbol =
+                          p.currency_symbol || formatCurrency(p.currency || "INR");
+
+                        return (
+                          <div
+                            key={productKey}
+                            className="border rounded p-2 bg-white text-center"
+                            style={{
+                              width: isFullscreen ? "clamp(180px, 30%, 260px)" : "75%",
+                              flexGrow: isFullscreen ? 1 : 0,
+                            }}
+                          >
+                            <img
+                              src={p.image}
+                              alt={p.name}
+                              style={{
+                                width: "100%",
+                                maxWidth: "140px",
+                                aspectRatio: "1 / 1",
+                                objectFit: "cover",
+                                borderRadius: "10px",
+                              }}
+                            />
+
+                            <h6 className="mt-2">{p.name}</h6>
+
+                            <p className="fw-bold text-success">
+                              {productCurrencySymbol}{p.price}
+                            </p>
+
+                            <div className="d-flex gap-2">
+                              <button
+                                className={`btn btn-sm w-50 ${inCart ? "btn-danger" : "btn-outline-primary"
+                                  }`}
+                                onClick={() => {
+                                  if (inCart) {
+                                    removeFromCart(productId);
+                                  } else {
+                                    addToCart(p);
+                                  }
+                                }}
+                              >
+                                {inCart ? "❌ Remove" : "🛒 Add"}
+                              </button>
+
+                              <button
+                                className="btn btn-sm btn-success w-50"
+                                onClick={() => buyNow(p)}
+                              >
+                                ⚡ Buy
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* ✅ Load More Button */}
+                  {i === chat.length - 1 && hasMore && (
+                    <div className="text-center mt-2">
+                      <button
+                        className="btn btn-outline-dark btn-sm"
+                        onClick={loadMoreProducts}
+                        disabled={loadingMore}
+                      >
+                        {loadingMore ? "Loading..." : "Load More Products"}
+                      </button>
+                    </div>
+                  )}
+
+
+                </div>
+              ))}
+
+              {isAgentLoading && (
+                <div className="d-flex mb-2 justify-content-start">
+                  <div style={{ maxWidth: "75%" }}>
+                    <div className="p-2 rounded-3 bg-white border">
+                      {AGENT_LOADING_TEXT}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {showPayment && (
+                <div className="mt-3 p-2 bg-white border rounded">
+                  {checkoutItems.length > 0 && (
+                    <div className="mb-2 p-2 border rounded bg-light">
+                      <div className="d-flex justify-content-between align-items-center mb-2">
+                        <b>Checkout Items</b>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-secondary"
+                          onClick={refreshCheckoutSession}
+                          disabled={isCheckoutSessionUpdating}
+                        >
+                          {isCheckoutSessionUpdating ? "Refreshing..." : "Refresh"}
+                        </button>
+                      </div>
+
+                      {checkoutItems.map((item) => {
+                        const symbol = formatCurrency(item.currency || "USD");
+                        return (
+                          <div
+                            key={`checkout-item-${item.id}`}
+                            className="d-flex justify-content-between align-items-center mb-2"
+                          >
+                            <div>
+                              <div className="fw-semibold">{item.name}</div>
+                              <small className="text-muted">
+                                {symbol}{item.unit_price} each
+                              </small>
+                            </div>
+                            <div className="d-flex align-items-center gap-2">
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-outline-dark"
+                                onClick={() => changeCheckoutItemQuantity(item.id, -1)}
+                                disabled={isCheckoutSessionUpdating || item.quantity <= 1}
+                              >
+                                -
+                              </button>
+                              <span>{item.quantity}</span>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-outline-dark"
+                                onClick={() => changeCheckoutItemQuantity(item.id, 1)}
+                                disabled={isCheckoutSessionUpdating}
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {checkoutPricing && (
+                        <div className="mt-2">
+                          <small className="text-muted d-block">
+                            Subtotal: {formatCurrency(checkoutPricing.currency || "USD")}
+                            {checkoutPricing.subtotal}
+                          </small>
+                          <small className="text-muted d-block">
+                            Shipping: {formatCurrency(checkoutPricing.currency || "USD")}
+                            {checkoutPricing.shipping}
+                          </small>
+                          <b>
+                            Total: {formatCurrency(checkoutPricing.currency || "USD")}
+                            {checkoutPricing.total}
+                          </b>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <Elements stripe={stripePromise}>
+                    <CheckoutForm onSuccess={handlePaymentSuccess} />
+                  </Elements>
+                  <button
+                    type="button"
+                    className="btn btn-outline-danger w-100 mt-2"
+                    onClick={cancelActiveCheckout}
+                    disabled={isCheckoutSessionUpdating}
+                  >
+                    {isCheckoutSessionUpdating ? "Cancelling..." : "Cancel Checkout"}
+                  </button>
+                </div>
+              )}
+
+
+
+
+              <div ref={chatEndRef} />
+            </div>
+
+            <div className="card-footer d-flex gap-2">
+              <textarea
+                ref={messageInputRef}
+              style={{resize:'none'}}
+                autoFocus
+                value={msg}
+                onChange={(e) => setMsg(e.target.value)}
+                className="form-control"
+                placeholder="Type..."
+                disabled={isAgentLoading}
+                rows={1}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault(); // prevent newline
+                    sendMessage();
+                  }
+                }}
+              />
+
+
+              <button
+                className="btn btn-dark"
+                onClick={sendMessage}
+                disabled={!msg.trim() || isAgentLoading}
+              >
+                ➤
+              </button>
+            </div>
 
           </div>
         </>

@@ -5,16 +5,6 @@ import { useCart } from "../../components/CartContext";
 export default function CartPage() {
   const { cart, removeFromCart } = useCart();
 
-  async function checkout() {
-    const res = await fetch("/api/checkout", {
-      method: "POST",
-      body: JSON.stringify({ product: cart[0] }),
-    });
-
-    const data = await res.json();
-    window.location.href = data.url;
-  }
-
   return (
     <div className="container py-5">
       <h2 className="fw-bold mb-4">🛒 Your Cart</h2>
@@ -40,9 +30,9 @@ export default function CartPage() {
             </div>
           ))}
 
-          <button className="btn btn-success w-100 mt-3" onClick={checkout}>
-            Pay Now (Stripe Checkout)
-          </button>
+          <div className="alert alert-info mt-3 mb-0">
+            Use the chat assistant checkout to complete payment.
+          </div>
         </>
       )}
     </div>

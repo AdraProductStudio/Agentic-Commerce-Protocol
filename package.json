@@ -15,6 +15,7 @@
     "mongodb": "^7.1.0",
     "mongoose": "^9.1.6",
     "next": "16.1.6",
+    "node-cron": "^4.2.1",
     "openai": "^6.18.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",

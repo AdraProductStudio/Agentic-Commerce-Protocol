@@ -1,3 +1,4 @@
+// import "@/lib/cancelExpiredSessions";
 import OpenAI from "openai";
 // ❌ Old static JSON import still kept (not deleted)
 import { productsData } from "@/data/productsData";
@@ -20,6 +21,7 @@ let selectedProduct = null;
 // ✅ Load More Memory
 let lastQuery = null;
 let lastSkip = 0;
+let lastBudget = null;
 
 /* -----------------------------
    POST Agent Route
@@ -28,15 +30,7 @@ export async function POST(req) {
   try {
     const { message } = await req.json();
     const text = message.trim().toLowerCase();
-
-    /* -----------------------------
-       ✅ STEP 0: Greetings
-    ----------------------------- */
-    if (["hi", "hello", "hey"].includes(text)) {
-      return Response.json({
-        reply: "👋 Hi! Ask me about mobiles available in our store.",
-      });
-    }
+    console.log("[API] POST /api/agent", { message });
 
     /* -----------------------------
        ✅ STEP 0.3: LOAD MORE SUPPORT
@@ -54,7 +48,9 @@ export async function POST(req) {
          Instead of Product.find()
       ------------------------------------------------- */
       const storeRes = await fetch(
-        `${process.env.NEXT_PUBLIC_BASE_URL}/api/products?query=${lastQuery}&skip=${lastSkip}`
+        `${process.env.NEXT_PUBLIC_BASE_URL}/api/products?query=${encodeURIComponent(
+          lastQuery
+        )}&skip=${lastSkip}${lastBudget !== null ? `&budget=${lastBudget}` : ""}`
       );
 
       const storeData = await storeRes.json();
@@ -75,6 +71,7 @@ export async function POST(req) {
        User: Track ORD_123456
     ----------------------------- */
     if (text.toLowerCase().includes("track")) {
+      console.log("[API] /api/agent -> track branch");
       const match = text.toUpperCase().match(/ORD_\d+/);
 
       if (!match) {
@@ -96,6 +93,19 @@ export async function POST(req) {
           });
         }
 
+        const totalQuantity = order.items.reduce(
+          (sum, i) => sum + (Number(i.quantity) || 0),
+          0
+        );
+        const calculatedTotalPrice = order.items.reduce(
+          (sum, i) => sum + (Number(i.price) || 0) * (Number(i.quantity) || 0),
+          0
+        );
+        const totalPrice =
+          calculatedTotalPrice > 0
+            ? calculatedTotalPrice
+            : Number(order.totalPrice) || 0;
+
         return Response.json({
           reply: `📦 Order Found Successfully!
 
@@ -105,17 +115,22 @@ export async function POST(req) {
 
 🛒 Items Purchased:
 ${order.items
-  .map(
-    (i) =>
-      `• ${i.name} × ${i.quantity} - ${formatCurrency(i.currency)}${
-        i.price * i.quantity
-      }`
-  )
-  .join("\n")}
+  .map((i) => {
+    const quantity = Number(i.quantity) || 0;
+    const unitPrice = Number(i.price) || 0;
+    const lineTotal = unitPrice * quantity;
+    const symbol = formatCurrency(i.currency);
+    return `• ${i.name}
+  Unit Price: ${symbol}${unitPrice}
+  Quantity: ${quantity}
+  Line Total: ${symbol}${lineTotal}`;
+  })
+  .join("\n\n")}
 
+🔢 Total Quantity: ${totalQuantity}
 💰 Total Price: ${formatCurrency(
             order.items[0]?.currency || "USD"
-          )}${order.totalPrice}
+          )}${totalPrice}
 
 Thank you for shopping with us! 🙏`,
         });
@@ -187,8 +202,7 @@ Would you like to proceed to checkout? (Yes/No)`,
     }
 
     /* -------------------------------------------------
-       ✅ STEP 4: OpenAI Extract Search Query
-       OpenAI decides what user wants
+       ✅ STEP 4: OpenAI Intent + Query Understanding
     ------------------------------------------------- */
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -197,19 +211,27 @@ Would you like to proceed to checkout? (Yes/No)`,
         {
           role: "system",
           content: `
-You are a shopping assistant.
+You are the intent parser for a mobile shopping assistant.
 
-Extract the product search keyword.
-
-Return ONLY JSON:
-
+Return ONLY valid JSON with this shape:
 {
-  "query": "keyword"
+  "intent": "product_search" | "conversation",
+  "query": "string",
+  "reply": "string"
 }
 
-Example:
-User: "iphone mobiles"
-Return: { "query": "iphone" }
+Rules:
+- Use "product_search" when user is asking to buy/find/recommend/compare mobiles, brands, models, specs, or price-range options.
+- Use "conversation" for greetings, thanks, small talk, unclear text, or unrelated requests.
+- For "product_search": return a concise catalog-friendly query in "query"; keep "reply" empty.
+- For "conversation": keep "query" empty and return a short helpful assistant reply in "reply" that guides user back to shopping.
+- Never return markdown or extra text outside JSON.
+
+Examples:
+User: "hiiiiiiii"
+Return: {"intent":"conversation","query":"","reply":"Hi! I can help you find mobiles. Tell me your budget, brand, or preferred features."}
+User: "show samsung under 30000"
+Return: {"intent":"product_search","query":"samsung","reply":""}
           `,
         },
         {
@@ -219,16 +241,38 @@ Return: { "query": "iphone" }
       ],
     });
 
-    const parsed = JSON.parse(aiResponse.choices[0].message.content);
+    let parsed = {};
+    try {
+      parsed = JSON.parse(aiResponse.choices[0].message.content || "{}");
+    } catch (e) {
+      console.warn("[API] /api/agent -> intent parse failed", e);
+    }
+
+    const intent = parsed.intent === "conversation" ? "conversation" : "product_search";
+    console.log("[API] /api/agent -> OpenAI intent done", {
+      intent,
+      query: parsed.query,
+    });
+
+    if (intent === "conversation") {
+      return Response.json({
+        reply:
+          parsed.reply ||
+          "I can help you buy mobiles. Tell me your budget, preferred brand, or camera/battery requirements.",
+      });
+    }
 
     // Keep exact user query for specific model-style searches (e.g. "Apple Mobile Model 9")
     const rawMessage = message.trim();
+    const hasBudgetPhrase =
+      /\b(under|below|less than|upto|up to|within|budget)\b/i.test(rawMessage);
     const looksLikeSpecificModel =
-      /\bmodel\b/i.test(rawMessage) || /\b\d+\b/.test(rawMessage);
+      /\bmodel\s*[a-z0-9-]*\d+[a-z0-9-]*\b/i.test(rawMessage) &&
+      !hasBudgetPhrase;
 
     let searchQuery = looksLikeSpecificModel
       ? rawMessage
-      : parsed.query || text;
+      : (parsed.query || "").trim() || text;
 
     // Brand alias normalization for better catalog matching
     const normalized = searchQuery.trim().toLowerCase();
@@ -244,9 +288,12 @@ Return: { "query": "iphone" }
     // Save query for Load More
     lastQuery = searchQuery;
     lastSkip = 0;
+    lastBudget = budget;
 
     // Call Store API Endpoint
-    let storeUrl = `${process.env.NEXT_PUBLIC_BASE_URL}/api/products?query=${searchQuery}&skip=0`;
+    let storeUrl = `${process.env.NEXT_PUBLIC_BASE_URL}/api/products?query=${encodeURIComponent(
+      searchQuery
+    )}&skip=0`;
 
     // Budget filter support
     if (budget !== null) {
@@ -255,6 +302,12 @@ Return: { "query": "iphone" }
 
     const storeRes = await fetch(storeUrl);
     const storeData = await storeRes.json();
+    console.log("[API] /api/agent -> /api/products fetched", {
+      query: searchQuery,
+      count: storeData.products?.length || 0,
+      nextSkip: storeData.nextSkip,
+      hasMore: storeData.hasMore,
+    });
 
     let matchedProducts = storeData.products;
 

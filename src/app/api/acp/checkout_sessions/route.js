@@ -1,65 +1,108 @@
 import Stripe from "stripe";
 import { connectDB } from "@/lib/mongodb";
 import CheckoutSession from "@/models/CheckoutSession";
+import {
+  ACP_API_VERSION,
+  buildPricing,
+  defaultFulfillmentOptions,
+  hasValidApiVersionHeader,
+  isAuthorized,
+  jsonAcpResponse,
+  resolveItemsWithPricing,
+  serializeCheckoutSession,
+  unauthorizedResponse,
+  validateAddress,
+  validateBuyer,
+  validateRequestedItems,
+} from "@/lib/acpCheckout";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 export async function POST(req) {
   try {
-    const auth = req.headers.get("authorization") || "";
-    const token = auth.replace("Bearer ", "");
+    console.log("[API] POST /api/acp/checkout_sessions");
+    if (!hasValidApiVersionHeader(req)) {
+      return jsonAcpResponse(
+        req,
+        { error: `Invalid or missing API-Version. Expected ${ACP_API_VERSION}` },
+        400
+      );
+    }
 
-    if (token !== process.env.ACP_SECRET_KEY) {
-      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    if (!isAuthorized(req)) {
+      return unauthorizedResponse(req);
     }
 
     await connectDB();
     const { buyer, items, fulfillment_address } = await req.json();
-
-    if (!buyer || !items || items.length === 0) {
-      return Response.json({ error: "buyer and items required" }, { status: 400 });
-    }
-
-    const subtotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
-    const tax = 0;
-    const total = subtotal + tax;
-
-    const session_id = "cs_" + Date.now();
-
-    const currency = (items[0].currency || "usd").toLowerCase();
-
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: total * 100,
-      currency,
-      automatic_payment_methods: { enabled: true },
-      metadata: { acp_session_id: session_id },
+    console.log("[API] /api/acp/checkout_sessions payload", {
+      itemCount: Array.isArray(items) ? items.length : 0,
+      buyerEmail: buyer?.email,
     });
 
-    const saved = await CheckoutSession.create({
-      session_id,
+    const buyerError = validateBuyer(buyer);
+    if (buyerError) {
+      return jsonAcpResponse(req, { error: buyerError }, 400);
+    }
+
+    const itemsError = validateRequestedItems(items);
+    if (itemsError) {
+      return jsonAcpResponse(req, { error: itemsError }, 400);
+    }
+
+    const addressError = validateAddress(fulfillment_address);
+    if (addressError) {
+      return jsonAcpResponse(req, { error: addressError }, 400);
+    }
+
+    const resolved = await resolveItemsWithPricing(items);
+    if (resolved.error) {
+      return jsonAcpResponse(
+        req,
+        { error: resolved.error, messages: resolved.messages },
+        resolved.status
+      );
+    }
+
+    const resolvedItems = resolved.resolvedItems;
+    const currency = (resolvedItems[0]?.currency || "USD").toLowerCase();
+    const sessionId = `cs_${Date.now()}`;
+    const availableFulfillmentOptions = defaultFulfillmentOptions(
+      resolvedItems[0]?.currency || "USD"
+    );
+    const fulfillmentOptionId = availableFulfillmentOptions[0].id;
+    const selectedOption = availableFulfillmentOptions[0];
+    const pricing = buildPricing(resolvedItems, selectedOption);
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(pricing.total * 100),
+      currency,
+      payment_method_types: ["card"],
+      metadata: { acp_session_id: sessionId },
+    });
+
+    const savedSession = await CheckoutSession.create({
+      session_id: sessionId,
       buyer,
-      items,
+      items: resolvedItems,
       fulfillment_address,
-      subtotal,
-      tax,
-      total,
+      fulfillment_option_id: fulfillmentOptionId,
+      available_fulfillment_options: availableFulfillmentOptions,
+      pricing,
+      messages: [],
       stripePaymentIntentId: paymentIntent.id,
       status: "pending",
     });
 
-    return Response.json({
-      checkout_session: {
-        id: saved.session_id,
-        status: saved.status,
-        subtotal,
-        tax,
-        total,
-        items,
+    return jsonAcpResponse(
+      req,
+      {
+        checkout_session: serializeCheckoutSession(savedSession),
       },
-      clientSecret: paymentIntent.client_secret,
-    });
+      201
+    );
   } catch (err) {
-    console.error(err);
-    return Response.json({ error: err.message }, { status: 500 });
+    console.error("[API] POST /api/acp/checkout_sessions error", err);
+    return jsonAcpResponse(req, { error: err.message }, 400);
   }
 }
