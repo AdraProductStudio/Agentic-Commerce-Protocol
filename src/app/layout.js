@@ -1,7 +1,7 @@
 import "bootstrap/dist/css/bootstrap.min.css";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
-import ChatWidget from "../components/ChatWidget";
+import ChatWidgetAuthGate from "../components/ChatWidgetAuthGate";
 import { CartProvider } from "../components/CartContext";
 
 export const metadata = {
@@ -17,8 +17,8 @@ export default function RootLayout({ children }) {
           {children}
           {/* <Footer /> */}
 
-          {/* Floating Agent Always Visible */}
-          <ChatWidget />
+          {/* Floating Agent for logged in users only */}
+          <ChatWidgetAuthGate />
         </CartProvider>
       </body>
     </html>

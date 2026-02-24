@@ -98,7 +98,7 @@ function CheckoutForm({ onSuccess }) {
 /* ---------------- Main Chat Widget ---------------- */
 export default function ChatWidget() {
   const [open, setOpen] = useState(true);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [viewportMode, setViewportMode] = useState("mobile");
   const [msg, setMsg] = useState("");
 
 
@@ -137,7 +137,14 @@ export default function ChatWidget() {
   const checkoutSessionIdRef = useRef(null);
   const [checkoutItems, setCheckoutItems] = useState([]);
   const [checkoutPricing, setCheckoutPricing] = useState(null);
+  const [checkoutDiscounts, setCheckoutDiscounts] = useState({
+    codes: [],
+    applied: [],
+    rejected: [],
+  });
+  const [promoCodeInput, setPromoCodeInput] = useState("");
   const [isCheckoutSessionUpdating, setIsCheckoutSessionUpdating] = useState(false);
+  const [agentToasts, setAgentToasts] = useState([]);
 
 
 
@@ -150,9 +157,74 @@ export default function ChatWidget() {
 
   const chatEndRef = useRef(null);
   const messageInputRef = useRef(null);
+  const toastIdRef = useRef(0);
+  const toastTimersRef = useRef(new Map());
+  const isDesktopMode = viewportMode === "desktop";
 
   function getProductId(product) {
     return product?.id ?? product?._id ?? null;
+  }
+
+  function formatAmount(amount) {
+    const value = Number(amount);
+    if (!Number.isFinite(value)) return "0.00";
+    return value.toFixed(2);
+  }
+
+  function clearToastTimer(id) {
+    const timer = toastTimersRef.current.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      toastTimersRef.current.delete(id);
+    }
+  }
+
+  function dismissToast(id) {
+    clearToastTimer(id);
+    setAgentToasts((prev) => prev.filter((toast) => toast.id !== id));
+  }
+
+  function scheduleToastDismiss(id, ttl = 9000) {
+    clearToastTimer(id);
+    const timer = setTimeout(() => {
+      dismissToast(id);
+    }, ttl);
+    toastTimersRef.current.set(id, timer);
+  }
+
+  function toReadableToastText(text) {
+    const base = String(text || "").trim();
+    if (!base) return base;
+    return `${base[0].toUpperCase()}${base.slice(1)}`;
+  }
+
+  function pushAgentToast({ type = "info", text, ttl = 9000 }) {
+    const id = ++toastIdRef.current;
+    const normalizedText = toReadableToastText(text);
+    setAgentToasts((prev) => {
+      const next = [...prev, { id, type, text: normalizedText, ttl }];
+      if (next.length <= 6) return next;
+      const overflowCount = next.length - 6;
+      const removed = next.slice(0, overflowCount);
+      removed.forEach((toast) => clearToastTimer(toast.id));
+      return next.slice(overflowCount);
+    });
+    scheduleToastDismiss(id, ttl);
+  }
+
+  function pushSessionMessagesToToasts(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    messages.forEach((message) => {
+      const code = String(message?.code || "");
+      if (code.startsWith("discount_code_")) return;
+      const type =
+        message?.type === "error" || message?.type === "warning"
+          ? message.type
+          : "info";
+      const content = message?.content || message?.text;
+      if (!content) return;
+      pushAgentToast({ type, text: content });
+    });
   }
 
   function syncCartFromCheckoutItems(items) {
@@ -188,6 +260,10 @@ export default function ChatWidget() {
       const data = await res.json();
 
       if (!res.ok) {
+        pushAgentToast({
+          type: "error",
+          text: `Unable to refresh checkout: ${data.error}`,
+        });
         setChat((prev) => [
           ...prev,
           { role: "agent", text: `❌ Unable to refresh checkout: ${data.error}` },
@@ -199,8 +275,17 @@ export default function ChatWidget() {
       const items = session.items || [];
       setCheckoutItems(items);
       setCheckoutPricing(session.pricing || null);
+      setCheckoutDiscounts(
+        session.discounts || { codes: [], applied: [], rejected: [] }
+      );
+      pushSessionMessagesToToasts(session.messages);
+      pushAgentToast({ type: "info", text: "Checkout session refreshed." });
       syncCartFromCheckoutItems(items);
     } catch {
+      pushAgentToast({
+        type: "error",
+        text: "Unable to refresh checkout right now.",
+      });
       setChat((prev) => [
         ...prev,
         { role: "agent", text: "❌ Unable to refresh checkout right now." },
@@ -233,6 +318,10 @@ export default function ChatWidget() {
 
       const data = await res.json();
       if (!res.ok) {
+        pushAgentToast({
+          type: "error",
+          text: `Unable to update checkout: ${data.error}`,
+        });
         setChat((prev) => [
           ...prev,
           { role: "agent", text: `❌ Unable to update checkout: ${data.error}` },
@@ -244,8 +333,20 @@ export default function ChatWidget() {
       const items = session.items || [];
       setCheckoutItems(items);
       setCheckoutPricing(session.pricing || null);
+      setCheckoutDiscounts(
+        session.discounts || { codes: [], applied: [], rejected: [] }
+      );
+      pushSessionMessagesToToasts(session.messages);
+      pushAgentToast({
+        type: "success",
+        text: "Purchase updated: quantity changes saved.",
+      });
       syncCartFromCheckoutItems(items);
     } catch {
+      pushAgentToast({
+        type: "error",
+        text: "Unable to update checkout right now.",
+      });
       setChat((prev) => [
         ...prev,
         { role: "agent", text: "❌ Unable to update checkout right now." },
@@ -356,6 +457,14 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
       messageInputRef.current?.focus();
     }
   }, [isAgentLoading]);
+
+  useEffect(() => {
+    const timers = toastTimersRef.current;
+    return () => {
+      timers.forEach((timer) => clearTimeout(timer));
+      timers.clear();
+    };
+  }, []);
 
   /* ---------------- Send Message ---------------- */
 
@@ -754,6 +863,10 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
 
       // Handle backend error
       if (!res.ok) {
+        pushAgentToast({
+          type: "error",
+          text: "Checkout session failed: " + paymentData.error,
+        });
         setChat((prev) => [
           ...prev,
           {
@@ -787,6 +900,18 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
       setCheckoutSessionId(normalizedSessionId);
       setCheckoutItems(paymentData.checkout_session?.items || []);
       setCheckoutPricing(paymentData.checkout_session?.pricing || null);
+      setCheckoutDiscounts(
+        paymentData.checkout_session?.discounts || {
+          codes: [],
+          applied: [],
+          rejected: [],
+        }
+      );
+      pushSessionMessagesToToasts(paymentData.checkout_session?.messages);
+      pushAgentToast({
+        type: "success",
+        text: "Purchase created. You can edit quantity, apply discounts, or pay.",
+      });
 
       setShowPayment(true);
 
@@ -796,6 +921,10 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
       ]);
     } catch (err) {
       console.error("❌ Checkout Session Error:", err);
+      pushAgentToast({
+        type: "error",
+        text: "Checkout failed. Try again.",
+      });
 
       setChat((prev) => [
         ...prev,
@@ -819,6 +948,7 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
       selectedProductRef.current = null;
       setCheckoutItems([]);
       setCheckoutPricing(null);
+      setCheckoutDiscounts({ codes: [], applied: [], rejected: [] });
       return;
     }
 
@@ -838,6 +968,10 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
       const cancelData = await res.json();
 
       if (!res.ok) {
+        pushAgentToast({
+          type: "error",
+          text: `Unable to cancel checkout: ${cancelData.error || "Unknown error"}`,
+        });
         setChat((prev) => [
           ...prev,
           {
@@ -852,8 +986,16 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
         ...prev,
         { role: "agent", text: "❌ Checkout cancelled successfully." },
       ]);
+      pushAgentToast({
+        type: "info",
+        text: "Purchase cancelled successfully.",
+      });
     } catch (err) {
       console.error("❌ Cancel Checkout Error:", err);
+      pushAgentToast({
+        type: "error",
+        text: "Unable to cancel checkout right now.",
+      });
       setChat((prev) => [
         ...prev,
         { role: "agent", text: "❌ Unable to cancel checkout right now." },
@@ -868,6 +1010,118 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
       checkoutSessionIdRef.current = null;
       setCheckoutItems([]);
       setCheckoutPricing(null);
+      setCheckoutDiscounts({ codes: [], applied: [], rejected: [] });
+      setIsCheckoutSessionUpdating(false);
+    }
+  }
+
+  async function updateCheckoutDiscounts(codes) {
+    const sessionId = (checkoutSessionIdRef.current || checkoutSessionId || "").trim();
+    if (!sessionId) {
+      pushAgentToast({
+        type: "error",
+        text: "No active checkout session found for discounts.",
+      });
+      setChat((prev) => [
+        ...prev,
+        { role: "agent", text: "❌ No active checkout session found for discounts." },
+      ]);
+      return;
+    }
+
+    setIsCheckoutSessionUpdating(true);
+    try {
+      console.log("[ChatWidget] POST /api/acp/checkout_sessions/:id (discounts)", {
+        sessionId,
+        codes,
+      });
+      const res = await fetch(`/api/acp/checkout_sessions/${encodeURIComponent(sessionId)}`, {
+        method: "POST",
+        headers: buildAcpHeaders(true),
+        body: JSON.stringify({
+          discounts: { codes },
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        pushAgentToast({
+          type: "error",
+          text: `Unable to apply discounts: ${data.error}`,
+        });
+        setChat((prev) => [
+          ...prev,
+          { role: "agent", text: `❌ Unable to apply discounts: ${data.error}` },
+        ]);
+        return;
+      }
+
+      const session = data.checkout_session || {};
+      const nextDiscounts = session.discounts || {
+        codes: [],
+        applied: [],
+        rejected: [],
+      };
+      console.log("[ChatWidget.updateCheckoutDiscounts] response", {
+        endpoint: "POST /api/acp/checkout_sessions/:id",
+        sessionId,
+        requestedCodes: codes,
+        pricing: session.pricing || null,
+        applied: nextDiscounts.applied?.map((d) => ({
+          code: d.code || d.coupon?.id,
+          amount: d.amount,
+        })),
+        rejected: nextDiscounts.rejected?.map((d) => ({
+          code: d.code,
+          reason: d.reason,
+        })),
+      });
+
+      setCheckoutItems(session.items || []);
+      setCheckoutPricing(session.pricing || null);
+      setCheckoutDiscounts(nextDiscounts);
+      setPromoCodeInput("");
+      pushSessionMessagesToToasts(session.messages);
+
+      if (nextDiscounts.applied?.length > 0) {
+        pushAgentToast({
+          type: "success",
+          text: `Discounts applied: ${nextDiscounts.applied
+            .map((d) => d.code || d.coupon?.id)
+            .join(", ")}`,
+        });
+      }
+      if (nextDiscounts.rejected?.length > 0) {
+        const allInvalid = nextDiscounts.rejected.every(
+          (d) => d.reason === "discount_code_invalid"
+        );
+        const allExpired = nextDiscounts.rejected.every(
+          (d) => d.reason === "discount_code_expired"
+        );
+        const rejectedCodes = nextDiscounts.rejected
+          .map((d) => d.code)
+          .join(", ");
+        const rejectedToastText = allInvalid
+          ? `Discount code invalid: ${rejectedCodes}`
+          : allExpired
+          ? `Discount code expired: ${rejectedCodes}`
+          : `Discount code rejected: ${rejectedCodes}`;
+        pushAgentToast({
+          type: "warning",
+          text: rejectedToastText,
+        });
+      }
+    } catch (err) {
+      console.error("❌ Update Discounts Error:", err);
+      pushAgentToast({
+        type: "error",
+        text: "Unable to update discounts right now.",
+      });
+      setChat((prev) => [
+        ...prev,
+        { role: "agent", text: "❌ Unable to update discounts right now." },
+      ]);
+    } finally {
       setIsCheckoutSessionUpdating(false);
     }
   }
@@ -886,6 +1140,10 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
 
     // ✅ Ensure session exists
     if (!sessionId) {
+      pushAgentToast({
+        type: "error",
+        text: "Session missing. Cannot confirm order.",
+      });
       setChat((prev) => [
         ...prev,
         { role: "agent", text: "❌ Session missing. Cannot confirm order." },
@@ -929,7 +1187,15 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
 
       // ✅ Handle backend confirm error
       if (!res.ok) {
-        const detailedMsg = orderData.messages?.[0]?.text;
+        const detailedMsg =
+          orderData.messages?.[0]?.content || orderData.messages?.[0]?.text;
+        pushSessionMessagesToToasts(orderData.messages);
+        pushAgentToast({
+          type: "error",
+          text: `Order confirmation failed: ${
+            detailedMsg || orderData.error || "Unknown error"
+          }`,
+        });
         setChat((prev) => [
           ...prev,
           {
@@ -951,14 +1217,30 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
         (sum, i) => sum + (Number(i.quantity) || 0),
         0
       );
-      const calculatedTotalPrice = items.reduce(
+      const subtotalFromItems = items.reduce(
         (sum, i) => sum + (Number(i.price) || 0) * (Number(i.quantity) || 0),
         0
       );
+      const subtotalPrice =
+        Number(order.subtotal_price) > 0
+          ? Number(order.subtotal_price)
+          : subtotalFromItems;
+      const shippingPrice = Number(order.shipping_price) || 0;
+      const discountValueFromOrder = Number(order.discount_value) || 0;
       const totalPrice =
-        calculatedTotalPrice > 0
-          ? calculatedTotalPrice
-          : Number(order.total_price) || 0;
+        Number(order.total_price) > 0
+          ? Number(order.total_price)
+          : Math.max(0, subtotalPrice + shippingPrice - discountValueFromOrder);
+      const derivedDiscountValue = Math.max(
+        0,
+        subtotalPrice + shippingPrice - totalPrice
+      );
+      const discountValue =
+        discountValueFromOrder > 0 ? discountValueFromOrder : derivedDiscountValue;
+      const discountPercent =
+        subtotalPrice > 0
+          ? ((discountValue / subtotalPrice) * 100).toFixed(2)
+          : "0.00";
 
       // ✅ Items Purchased Text
       const itemsText =
@@ -988,18 +1270,29 @@ Reply "Yes" to continue checkout or "No" to cancel.`,
 ${itemsText}
 
 🔢 Total Quantity: ${totalQuantity}
+🏷️ Discount Percentage: ${discountPercent}%
+🏷️ Discount Value: ${currencySymbol}${discountValue}
 💰 Total Price: ${currencySymbol}${totalPrice}`;
 
       setChat((prev) => [...prev, { role: "agent", text: orderMessage }]);
+      pushAgentToast({
+        type: "success",
+        text: "Purchase completed successfully.",
+      });
 
       // ✅ Clear Cart after successful payment
       setCart([]);
       setCheckoutItems([]);
       setCheckoutPricing(null);
+      setCheckoutDiscounts({ codes: [], applied: [], rejected: [] });
       setCheckoutSessionId(null);
       checkoutSessionIdRef.current = null;
     } catch (err) {
       console.error("❌ Confirm Order Error:", err);
+      pushAgentToast({
+        type: "error",
+        text: "Something went wrong confirming your order.",
+      });
 
       setChat((prev) => [
         ...prev,
@@ -1029,9 +1322,8 @@ ${itemsText}
 
       {open && (
         <>
-          {isFullscreen && (
+          {isDesktopMode && (
             <div
-              onClick={() => setIsFullscreen(false)}
               style={{
                 position: "fixed",
                 inset: 0,
@@ -1047,10 +1339,13 @@ ${itemsText}
             className="card shadow-lg"
             style={{
               position: "fixed",
-              bottom: isFullscreen ? "5vh" : "90px",
-              right: isFullscreen ? "5vw" : "20px",
-              width: isFullscreen ? "90vw" : "370px",
-              height: isFullscreen ? "90vh" : "520px",
+              bottom: isDesktopMode ? "auto" : "90px",
+              right: isDesktopMode ? "auto" : "20px",
+              top: isDesktopMode ? "50%" : "auto",
+              left: isDesktopMode ? "50%" : "auto",
+              transform: isDesktopMode ? "translate(-50%, -50%)" : "none",
+              width: isDesktopMode ? "90vw" : "370px",
+              height: isDesktopMode ? "90vh" : "520px",
               borderRadius: "15px",
               display: "flex",
               flexDirection: "column",
@@ -1068,11 +1363,19 @@ ${itemsText}
               <div className="d-flex align-items-center gap-2">
                 <button
                   type="button"
-                  title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                  title={
+                    isDesktopMode
+                      ? "Switch to mobile view"
+                      : "Switch to desktop view"
+                  }
                   className="btn btn-sm btn-outline-light"
-                  onClick={() => setIsFullscreen((prev) => !prev)}
+                  onClick={() =>
+                    setViewportMode((prev) =>
+                      prev === "desktop" ? "mobile" : "desktop"
+                    )
+                  }
                 >
-                  {isFullscreen ? "🗗" : "⛶"}
+                  {isDesktopMode ? "Minimize" : "Fullscreen"}
                 </button>
 
                 {/* ✅ Show Cart Button ONLY when menu is closed */}
@@ -1131,6 +1434,38 @@ ${itemsText}
 
             </div>
 
+            {agentToasts.length > 0 && (
+              <div className="px-2 pt-2">
+                {agentToasts.map((toast) => (
+                  <div
+                    key={toast.id}
+                    className={`alert py-1 px-2 mb-1 d-flex justify-content-between align-items-center ${
+                      toast.type === "success"
+                        ? "alert-success"
+                        : toast.type === "warning"
+                        ? "alert-warning"
+                        : toast.type === "error"
+                        ? "alert-danger"
+                        : "alert-info"
+                    }`}
+                    role="alert"
+                    style={{ fontSize: "12px" }}
+                    onMouseEnter={() => clearToastTimer(toast.id)}
+                    onMouseLeave={() => scheduleToastDismiss(toast.id, toast.ttl || 9000)}
+                  >
+                    <span>{toast.text}</span>
+                    <button
+                      type="button"
+                      className="btn-close"
+                      aria-label="Close"
+                      onClick={() => dismissToast(toast.id)}
+                      style={{ fontSize: "10px" }}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+
 
 
 
@@ -1186,8 +1521,8 @@ ${itemsText}
                             key={productKey}
                             className="border rounded p-2 bg-white text-center"
                             style={{
-                              width: isFullscreen ? "clamp(180px, 30%, 260px)" : "75%",
-                              flexGrow: isFullscreen ? 1 : 0,
+                              width: isDesktopMode ? "clamp(180px, 30%, 260px)" : "75%",
+                              flexGrow: isDesktopMode ? 1 : 0,
                             }}
                           >
                             <img
@@ -1264,7 +1599,14 @@ ${itemsText}
               )}
 
               {showPayment && (
-                <div className="mt-3 p-2 bg-white border rounded">
+                <div
+                  className="mt-3 p-2 bg-white border rounded"
+                  style={{
+                    width: "100%",
+                    maxWidth: isDesktopMode ? "560px" : "100%",
+                    marginInline: "auto",
+                  }}
+                >
                   {checkoutItems.length > 0 && (
                     <div className="mb-2 p-2 border rounded bg-light">
                       <div className="d-flex justify-content-between align-items-center mb-2">
@@ -1317,20 +1659,105 @@ ${itemsText}
 
                       {checkoutPricing && (
                         <div className="mt-2">
+                          {(() => {
+                            const subtotal = Number(checkoutPricing.subtotal) || 0;
+                            const shipping = Number(checkoutPricing.shipping) || 0;
+                            const total = Number(checkoutPricing.total) || 0;
+                            const rawDiscount = Number(checkoutPricing.discount);
+                            const discount =
+                              Number.isFinite(rawDiscount) && rawDiscount > 0
+                                ? rawDiscount
+                                : Math.max(0, subtotal + shipping - total);
+                            const discountPercent =
+                              subtotal > 0 ? ((discount / subtotal) * 100).toFixed(2) : null;
+                            return (
+                              <>
                           <small className="text-muted d-block">
                             Subtotal: {formatCurrency(checkoutPricing.currency || "USD")}
-                            {checkoutPricing.subtotal}
+                            {formatAmount(checkoutPricing.subtotal)}
                           </small>
                           <small className="text-muted d-block">
                             Shipping: {formatCurrency(checkoutPricing.currency || "USD")}
-                            {checkoutPricing.shipping}
+                            {formatAmount(checkoutPricing.shipping)}
+                          </small>
+                          <small className="text-muted d-block">
+                            Discount: {formatCurrency(checkoutPricing.currency || "USD")}
+                            {formatAmount(discount)}
+                            {discount > 0 && discountPercent ? ` (-${discountPercent}%)` : ""}
                           </small>
                           <b>
                             Total: {formatCurrency(checkoutPricing.currency || "USD")}
-                            {checkoutPricing.total}
+                            {formatAmount(checkoutPricing.total)}
                           </b>
+                              </>
+                            );
+                          })()}
                         </div>
                       )}
+
+                      <div className="mt-2">
+                        <div className="d-flex gap-2 align-items-center flex-wrap">
+                          <input
+                            type="text"
+                            className="form-control form-control-sm"
+                            placeholder="Promo code (e.g. SAVE20)"
+                            value={promoCodeInput}
+                            onChange={(e) => setPromoCodeInput(e.target.value)}
+                            onKeyDown={async (e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                const codes = promoCodeInput
+                                  .split(/[,\s]+/)
+                                  .map((code) => code.trim())
+                                  .filter(Boolean);
+                                if (codes.length > 0) {
+                                  await updateCheckoutDiscounts(codes);
+                                }
+                              }
+                            }}
+                            disabled={isCheckoutSessionUpdating}
+                          />
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-primary"
+                            disabled={
+                              isCheckoutSessionUpdating || !promoCodeInput.trim()
+                            }
+                            onClick={async () => {
+                              const codes = promoCodeInput
+                                .split(/[,\s]+/)
+                                .map((code) => code.trim())
+                                .filter(Boolean);
+                              if (codes.length > 0) {
+                                await updateCheckoutDiscounts(codes);
+                              }
+                            }}
+                          >
+                            Apply
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-outline-secondary"
+                            disabled={isCheckoutSessionUpdating}
+                            onClick={async () => {
+                              await updateCheckoutDiscounts([]);
+                              setPromoCodeInput("");
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        {checkoutDiscounts.applied?.length > 0 && (
+                          <small className="text-success d-block">
+                            Applied: {checkoutDiscounts.applied.map((d) => d.code || d.coupon?.id).join(", ")}
+                          </small>
+                        )}
+                        {checkoutDiscounts.rejected?.length > 0 && (
+                          <small className="text-danger d-block">
+                            Rejected: {checkoutDiscounts.rejected.map((d) => d.code).join(", ")}
+                          </small>
+                        )}
+                      </div>
                     </div>
                   )}
 
@@ -1339,7 +1766,7 @@ ${itemsText}
                   </Elements>
                   <button
                     type="button"
-                    className="btn btn-outline-danger w-100 mt-2"
+                    className="btn btn-outline-secondary w-100 mt-2"
                     onClick={cancelActiveCheckout}
                     disabled={isCheckoutSessionUpdating}
                   >

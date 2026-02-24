@@ -4,6 +4,7 @@ import CheckoutSession from "@/models/CheckoutSession";
 import Order from "@/models/Order";
 import {
   ACP_API_VERSION,
+  createErrorMessage,
   hasValidApiVersionHeader,
   isAuthorized,
   jsonAcpResponse,
@@ -122,11 +123,12 @@ export async function POST(req, { params }) {
         {
           error: "Payment processing failed",
           messages: [
-            {
-              code: "payment_error",
-              level: "error",
-              text: err.message,
-            },
+            createErrorMessage({
+              code: "payment_declined",
+              severity: "high",
+              param: "$.payment_data.token",
+              content: err.message,
+            }),
           ],
         },
         402
@@ -139,11 +141,12 @@ export async function POST(req, { params }) {
         {
           error: "Payment processing failed",
           messages: [
-            {
-              code: "payment_incomplete",
-              level: "error",
-              text: `Stripe status is ${paymentIntent.status}`,
-            },
+            createErrorMessage({
+              code: "payment_declined",
+              severity: "high",
+              param: "$.payment_data.token",
+              content: `Stripe status is ${paymentIntent.status}`,
+            }),
           ],
         },
         402
@@ -172,6 +175,14 @@ export async function POST(req, { params }) {
         quantity: item.quantity,
         currency: item.currency,
       })),
+      discounts: {
+        codes: session.discounts?.codes || [],
+        applied: session.discounts?.applied || [],
+        rejected: session.discounts?.rejected || [],
+      },
+      subtotalPrice: Number(session.pricing?.subtotal) || 0,
+      shippingPrice: Number(session.pricing?.shipping) || 0,
+      discountValue: Number(session.pricing?.discount) || 0,
       totalPrice: session.pricing?.total || 0,
       paymentStatus: "paid",
       status: "confirmed",
@@ -190,9 +201,13 @@ export async function POST(req, { params }) {
         id: order.orderId,
         payment_status: order.paymentStatus,
         delivery_status: order.status,
+        subtotal_price: order.subtotalPrice,
+        shipping_price: order.shippingPrice,
+        discount_value: order.discountValue,
         total_price: order.totalPrice,
         currency: session.pricing?.currency || "USD",
         items: order.items,
+        discounts: order.discounts,
       },
     });
   } catch (err) {
@@ -202,11 +217,12 @@ export async function POST(req, { params }) {
       {
         error: "Payment cannot be processed",
         messages: [
-          {
-            code: "unprocessable_payment",
-            level: "error",
-            text: err.message,
-          },
+          createErrorMessage({
+            code: "intervention_required",
+            severity: "high",
+            param: "$.payment_data",
+            content: err.message,
+          }),
         ],
       },
       422

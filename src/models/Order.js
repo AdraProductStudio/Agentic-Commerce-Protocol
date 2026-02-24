@@ -20,6 +20,14 @@ const OrderSchema = new mongoose.Schema(
         currency: String,
       },
     ],
+    discounts: {
+      codes: [String],
+      applied: [mongoose.Schema.Types.Mixed],
+      rejected: [mongoose.Schema.Types.Mixed],
+    },
+    subtotalPrice: Number,
+    shippingPrice: Number,
+    discountValue: Number,
     totalPrice: Number,
     paymentStatus: String,
     status: String,
@@ -29,5 +37,3 @@ const OrderSchema = new mongoose.Schema(
 
 export default mongoose.models.Order ||
   mongoose.model("Order", OrderSchema);
-
-

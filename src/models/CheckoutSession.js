@@ -26,9 +26,61 @@ const FulfillmentOptionSchema = new mongoose.Schema(
 
 const MessageSchema = new mongoose.Schema(
   {
+    type: { type: String },
     code: { type: String },
-    level: { type: String },
-    text: { type: String },
+    severity: { type: String },
+    param: { type: String },
+    content_type: { type: String },
+    content: { type: String },
+  },
+  { _id: false }
+);
+
+const DiscountAllocationSchema = new mongoose.Schema(
+  {
+    path: { type: String },
+    amount: { type: Number }, // minor currency unit
+  },
+  { _id: false }
+);
+
+const CouponSchema = new mongoose.Schema(
+  {
+    id: { type: String },
+    name: { type: String },
+    percent_off: { type: Number },
+    amount_off: { type: Number }, // minor currency unit
+    currency: { type: String },
+    duration: { type: String },
+    duration_in_months: { type: Number },
+    max_redemptions: { type: Number },
+    times_redeemed: { type: Number },
+    metadata: { type: mongoose.Schema.Types.Mixed },
+  },
+  { _id: false }
+);
+
+const AppliedDiscountSchema = new mongoose.Schema(
+  {
+    id: { type: String },
+    code: { type: String },
+    coupon: { type: CouponSchema, default: null },
+    amount: { type: Number }, // minor currency unit
+    automatic: { type: Boolean, default: false },
+    start: { type: String },
+    end: { type: String },
+    method: { type: String },
+    priority: { type: Number },
+    allocations: { type: [DiscountAllocationSchema], default: [] },
+  },
+  { _id: false }
+);
+
+const RejectedDiscountSchema = new mongoose.Schema(
+  {
+    code: { type: String },
+    reason: { type: String },
+    message: { type: String },
   },
   { _id: false }
 );
@@ -64,10 +116,17 @@ const CheckoutSessionSchema = new mongoose.Schema(
 
     pricing: {
       subtotal: Number,
+      discount: Number,
       tax: Number,
       shipping: Number,
       total: Number,
       currency: String,
+    },
+
+    discounts: {
+      codes: { type: [String], default: [] },
+      applied: { type: [AppliedDiscountSchema], default: [] },
+      rejected: { type: [RejectedDiscountSchema], default: [] },
     },
 
     messages: { type: [MessageSchema], default: [] },
@@ -94,5 +153,3 @@ const CheckoutSessionSchema = new mongoose.Schema(
 
 export default mongoose.models.CheckoutSession ||
   mongoose.model("CheckoutSession", CheckoutSessionSchema);
-
-

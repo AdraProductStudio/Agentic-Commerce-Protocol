@@ -97,14 +97,30 @@ export async function POST(req) {
           (sum, i) => sum + (Number(i.quantity) || 0),
           0
         );
-        const calculatedTotalPrice = order.items.reduce(
+        const subtotalFromItems = order.items.reduce(
           (sum, i) => sum + (Number(i.price) || 0) * (Number(i.quantity) || 0),
           0
         );
+        const subtotalPrice =
+          Number(order.subtotalPrice) > 0
+            ? Number(order.subtotalPrice)
+            : subtotalFromItems;
+        const shippingPrice = Number(order.shippingPrice) || 0;
+        const discountValueFromOrder = Number(order.discountValue) || 0;
         const totalPrice =
-          calculatedTotalPrice > 0
-            ? calculatedTotalPrice
-            : Number(order.totalPrice) || 0;
+          Number(order.totalPrice) > 0
+            ? Number(order.totalPrice)
+            : Math.max(0, subtotalPrice + shippingPrice - discountValueFromOrder);
+        const derivedDiscountValue = Math.max(
+          0,
+          subtotalPrice + shippingPrice - totalPrice
+        );
+        const discountValue =
+          discountValueFromOrder > 0 ? discountValueFromOrder : derivedDiscountValue;
+        const discountPercent =
+          subtotalPrice > 0
+            ? ((discountValue / subtotalPrice) * 100).toFixed(2)
+            : "0.00";
 
         return Response.json({
           reply: `📦 Order Found Successfully!
@@ -128,6 +144,10 @@ ${order.items
   .join("\n\n")}
 
 🔢 Total Quantity: ${totalQuantity}
+🏷️ Discount Percentage: ${discountPercent}%
+🏷️ Discount Value: ${formatCurrency(
+            order.items[0]?.currency || "USD"
+          )}${discountValue}
 💰 Total Price: ${formatCurrency(
             order.items[0]?.currency || "USD"
           )}${totalPrice}

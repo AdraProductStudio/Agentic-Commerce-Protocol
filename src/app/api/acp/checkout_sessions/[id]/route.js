@@ -3,15 +3,19 @@ import { connectDB } from "@/lib/mongodb";
 import CheckoutSession from "@/models/CheckoutSession";
 import {
   ACP_API_VERSION,
+  applyDiscounts,
   buildPricing,
+  createErrorMessage,
   hasValidApiVersionHeader,
   isAuthorized,
   jsonAcpResponse,
+  normalizeDiscountCodes,
   resolveItemsWithPricing,
   serializeCheckoutSession,
   unauthorizedResponse,
   validateAddress,
   validateBuyer,
+  validateDiscountsRequest,
   validateRequestedItems,
 } from "@/lib/acpCheckout";
 
@@ -82,11 +86,12 @@ export async function POST(req, { params }) {
         {
           error: "Checkout session is not editable",
           messages: [
-            {
-              code: "session_locked",
-              level: "error",
-              text: "Only pending checkout sessions can be updated",
-            },
+            createErrorMessage({
+              code: "conflict",
+              severity: "medium",
+              param: "$.status",
+              content: "Only pending checkout sessions can be updated",
+            }),
           ],
         },
         422
@@ -94,17 +99,20 @@ export async function POST(req, { params }) {
     }
 
     const update = await req.json();
+    let resolvedMessages = [];
     console.log("[API] /api/acp/checkout_sessions/:id update payload", {
       hasBuyer: update.buyer !== undefined,
       hasItems: update.items !== undefined,
       hasAddress: update.fulfillment_address !== undefined,
       hasFulfillmentOption: update.fulfillment_option_id !== undefined,
+      hasDiscounts: update.discounts !== undefined,
     });
     const hasKnownField =
       update.buyer !== undefined ||
       update.items !== undefined ||
       update.fulfillment_address !== undefined ||
-      update.fulfillment_option_id !== undefined;
+      update.fulfillment_option_id !== undefined ||
+      update.discounts !== undefined;
 
     if (!hasKnownField) {
       return jsonAcpResponse(req, { error: "No updatable fields provided" }, 400);
@@ -142,6 +150,7 @@ export async function POST(req, { params }) {
       }
 
       session.items = resolved.resolvedItems;
+      resolvedMessages = resolved.messages || [];
     }
 
     if (update.fulfillment_option_id !== undefined) {
@@ -156,10 +165,57 @@ export async function POST(req, { params }) {
       session.fulfillment_option_id = option.id;
     }
 
+    if (update.discounts !== undefined) {
+      const discountsError = validateDiscountsRequest(update.discounts);
+      if (discountsError) {
+        console.log("[API] /api/acp/checkout_sessions/:id discounts validation failed", {
+          endpoint: "POST /api/acp/checkout_sessions/:id",
+          sessionId,
+          discounts: update.discounts,
+          discountsError,
+        });
+        return jsonAcpResponse(req, { error: discountsError }, 400);
+      }
+    }
+
     const selectedOption = (session.available_fulfillment_options || []).find(
       (o) => o.id === session.fulfillment_option_id
     );
-    session.pricing = buildPricing(session.items, selectedOption);
+    const effectiveCodes =
+      update.discounts !== undefined
+        ? normalizeDiscountCodes(update.discounts)
+        : session.discounts?.codes || [];
+    console.log("[API] /api/acp/checkout_sessions/:id discount params", {
+      endpoint: "POST /api/acp/checkout_sessions/:id",
+      sessionId,
+      effectiveCodes,
+    });
+
+    const discountResult = applyDiscounts({
+      resolvedItems: session.items,
+      shippingMajor: selectedOption?.amount || 0,
+      currency: session.items?.[0]?.currency || "USD",
+      discounts: { codes: effectiveCodes },
+    });
+    console.log("[API] /api/acp/checkout_sessions/:id discount result", {
+      endpoint: "POST /api/acp/checkout_sessions/:id",
+      sessionId,
+      appliedCount: discountResult.discounts.applied.length,
+      rejectedCount: discountResult.discounts.rejected.length,
+      discountTotalMinor: discountResult.discountTotalMinor,
+    });
+
+    session.discounts = discountResult.discounts;
+    session.pricing = buildPricing(
+      session.items,
+      selectedOption,
+      discountResult.discountTotalMinor
+    );
+    console.log("[API] /api/acp/checkout_sessions/:id pricing result", {
+      endpoint: "POST /api/acp/checkout_sessions/:id",
+      sessionId,
+      pricing: session.pricing,
+    });
 
     if (session.stripePaymentIntentId) {
       await stripe.paymentIntents.update(session.stripePaymentIntentId, {
@@ -167,7 +223,19 @@ export async function POST(req, { params }) {
       });
     }
 
-    session.messages = [];
+    const existingNonDiscountMessages =
+      update.items === undefined
+        ? (session.messages || []).filter((msg) => {
+            const code = String(msg?.code || "");
+            return !code.startsWith("discount_code_");
+          })
+        : [];
+
+    session.messages = [
+      ...existingNonDiscountMessages,
+      ...resolvedMessages,
+      ...(discountResult.messages || []),
+    ];
     await session.save();
 
     return jsonAcpResponse(req, {

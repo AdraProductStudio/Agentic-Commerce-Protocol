@@ -3,6 +3,7 @@ import { connectDB } from "@/lib/mongodb";
 import CheckoutSession from "@/models/CheckoutSession";
 import {
   ACP_API_VERSION,
+  applyDiscounts,
   buildPricing,
   defaultFulfillmentOptions,
   hasValidApiVersionHeader,
@@ -13,6 +14,7 @@ import {
   unauthorizedResponse,
   validateAddress,
   validateBuyer,
+  validateDiscountsRequest,
   validateRequestedItems,
 } from "@/lib/acpCheckout";
 
@@ -34,10 +36,11 @@ export async function POST(req) {
     }
 
     await connectDB();
-    const { buyer, items, fulfillment_address } = await req.json();
+    const { buyer, items, fulfillment_address, discounts } = await req.json();
     console.log("[API] /api/acp/checkout_sessions payload", {
       itemCount: Array.isArray(items) ? items.length : 0,
       buyerEmail: buyer?.email,
+      discountCodes: discounts?.codes || [],
     });
 
     const buyerError = validateBuyer(buyer);
@@ -53,6 +56,16 @@ export async function POST(req) {
     const addressError = validateAddress(fulfillment_address);
     if (addressError) {
       return jsonAcpResponse(req, { error: addressError }, 400);
+    }
+
+    const discountsError = validateDiscountsRequest(discounts);
+    if (discountsError) {
+      console.log("[API] /api/acp/checkout_sessions discounts validation failed", {
+        endpoint: "POST /api/acp/checkout_sessions",
+        discounts,
+        discountsError,
+      });
+      return jsonAcpResponse(req, { error: discountsError }, 400);
     }
 
     const resolved = await resolveItemsWithPricing(items);
@@ -72,7 +85,33 @@ export async function POST(req) {
     );
     const fulfillmentOptionId = availableFulfillmentOptions[0].id;
     const selectedOption = availableFulfillmentOptions[0];
-    const pricing = buildPricing(resolvedItems, selectedOption);
+    const discountResult = applyDiscounts({
+      resolvedItems,
+      shippingMajor: selectedOption?.amount || 0,
+      currency: resolvedItems[0]?.currency || "USD",
+      discounts,
+    });
+    const sessionMessages = [
+      ...(resolved.messages || []),
+      ...(discountResult.messages || []),
+    ];
+    console.log("[API] /api/acp/checkout_sessions discount result", {
+      endpoint: "POST /api/acp/checkout_sessions",
+      requestedCodes: discounts?.codes || [],
+      appliedCount: discountResult.discounts.applied.length,
+      rejectedCount: discountResult.discounts.rejected.length,
+      discountTotalMinor: discountResult.discountTotalMinor,
+      messageCount: sessionMessages.length,
+    });
+    const pricing = buildPricing(
+      resolvedItems,
+      selectedOption,
+      discountResult.discountTotalMinor
+    );
+    console.log("[API] /api/acp/checkout_sessions pricing result", {
+      endpoint: "POST /api/acp/checkout_sessions",
+      pricing,
+    });
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: Math.round(pricing.total * 100),
@@ -89,7 +128,8 @@ export async function POST(req) {
       fulfillment_option_id: fulfillmentOptionId,
       available_fulfillment_options: availableFulfillmentOptions,
       pricing,
-      messages: [],
+      discounts: discountResult.discounts,
+      messages: sessionMessages,
       stripePaymentIntentId: paymentIntent.id,
       status: "pending",
     });

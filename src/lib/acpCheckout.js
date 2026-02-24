@@ -6,6 +6,93 @@ import crypto from "crypto";
 ------------------------------------------- */
 export const ACP_API_VERSION = process.env.ACP_API_VERSION || "2026-01-30";
 
+export const DISCOUNT_ERROR_CODES = new Set([
+  "discount_code_expired",
+  "discount_code_invalid",
+  "discount_code_already_applied",
+  "discount_code_combination_disallowed",
+  "discount_code_minimum_not_met",
+  "discount_code_user_not_logged_in",
+  "discount_code_user_ineligible",
+  "discount_code_usage_limit_reached",
+]);
+
+export const MESSAGE_WARNING_CODES = new Set([
+  "low_stock",
+  "high_demand",
+  "shipping_delay",
+  "price_change",
+  "expiring_promotion",
+  "limited_availability",
+  "discount_code_expired",
+  "discount_code_invalid",
+  "discount_code_already_applied",
+  "discount_code_combination_disallowed",
+  "discount_code_minimum_not_met",
+  "discount_code_user_not_logged_in",
+  "discount_code_user_ineligible",
+  "discount_code_usage_limit_reached",
+]);
+
+export const MESSAGE_ERROR_CODES = new Set([
+  "missing",
+  "invalid",
+  "out_of_stock",
+  "payment_declined",
+  "requires_sign_in",
+  "requires_3ds",
+  "low_stock",
+  "quantity_exceeded",
+  "coupon_invalid",
+  "coupon_expired",
+  "minimum_not_met",
+  "maximum_exceeded",
+  "region_restricted",
+  "age_verification_required",
+  "approval_required",
+  "unsupported",
+  "not_found",
+  "conflict",
+  "rate_limited",
+  "expired",
+  "intervention_required",
+]);
+
+const FIXED_COUPON_CATALOG = {
+  SAVE20: {
+    id: "coupon_summer2026",
+    name: "Summer Sale 20% Off",
+    percent_off: 20,
+    duration: "once",
+    max_redemptions: 1000,
+    times_redeemed: 145,
+    metadata: { source: "seed" },
+  },
+  FREESHIP: {
+    id: "coupon_freeship2026",
+    name: "Free Shipping",
+    amount_off: 499, // minor unit
+    currency: "INR",
+    duration: "once",
+    max_redemptions: 1000,
+    times_redeemed: 60,
+    metadata: { source: "seed", scope: "shipping" },
+  },
+  EXPIRED10: {
+    id: "coupon_expired10",
+    name: "Expired 10% Off",
+    percent_off: 10,
+    duration: "once",
+    max_redemptions: 1000,
+    times_redeemed: 1000,
+    metadata: {
+      source: "seed",
+      expires_at: "2026-01-31T23:59:59.000Z",
+    },
+  },
+};
+const LOW_STOCK_WARNING_THRESHOLD = 3;
+
 /* -------------------------------------------
    API-Version Header Validation
 ------------------------------------------- */
@@ -45,6 +132,68 @@ export function jsonAcpResponse(req, body, status = 200) {
     status,
     headers: buildAcpResponseHeaders(req),
   });
+}
+
+function normalizeSeverity(severity, fallback = "medium") {
+  const allowed = new Set(["info", "low", "medium", "high", "critical"]);
+  return allowed.has(severity) ? severity : fallback;
+}
+
+function normalizeContentType(contentType) {
+  return contentType === "markdown" ? "markdown" : "plain";
+}
+
+export function createInfoMessage({
+  severity = "info",
+  param,
+  content_type = "plain",
+  content,
+}) {
+  return {
+    type: "info",
+    severity: normalizeSeverity(severity, "info"),
+    ...(param ? { param } : {}),
+    content_type: normalizeContentType(content_type),
+    content: String(content || ""),
+  };
+}
+
+export function createWarningMessage({
+  code,
+  severity = "medium",
+  param,
+  content_type = "plain",
+  content,
+}) {
+  const safeCode = MESSAGE_WARNING_CODES.has(code)
+    ? code
+    : "limited_availability";
+  return {
+    type: "warning",
+    code: safeCode,
+    severity: normalizeSeverity(severity, "medium"),
+    ...(param ? { param } : {}),
+    content_type: normalizeContentType(content_type),
+    content: String(content || ""),
+  };
+}
+
+export function createErrorMessage({
+  code,
+  severity = "medium",
+  param,
+  content_type = "plain",
+  content,
+}) {
+  const safeCode = MESSAGE_ERROR_CODES.has(code) ? code : "unsupported";
+  return {
+    type: "error",
+    code: safeCode,
+    severity: normalizeSeverity(severity, "medium"),
+    ...(param ? { param } : {}),
+    content_type: normalizeContentType(content_type),
+    content: String(content || ""),
+  };
 }
 
 /* -------------------------------------------
@@ -147,6 +296,297 @@ export function validateRequestedItems(items) {
   return null;
 }
 
+export function validateDiscountsRequest(discounts) {
+  console.log("[acpCheckout.validateDiscountsRequest] params", { discounts });
+  if (discounts === undefined) return null;
+  if (!discounts || typeof discounts !== "object") {
+    console.log("[acpCheckout.validateDiscountsRequest] result", {
+      error: "discounts must be an object with a codes array",
+    });
+    return "discounts must be an object with a codes array";
+  }
+
+  if (!Array.isArray(discounts.codes)) {
+    console.log("[acpCheckout.validateDiscountsRequest] result", {
+      error: "discounts.codes must be an array of strings",
+    });
+    return "discounts.codes must be an array of strings";
+  }
+
+  const hasInvalidCode = discounts.codes.some(
+    (code) => typeof code !== "string" || code.trim() === ""
+  );
+  if (hasInvalidCode) {
+    console.log("[acpCheckout.validateDiscountsRequest] result", {
+      error: "discounts.codes must contain non-empty strings",
+    });
+    return "discounts.codes must contain non-empty strings";
+  }
+
+  console.log("[acpCheckout.validateDiscountsRequest] result", { error: null });
+  return null;
+}
+
+export function normalizeDiscountCodes(discounts) {
+  console.log("[acpCheckout.normalizeDiscountCodes] params", { discounts });
+  if (!discounts || !Array.isArray(discounts.codes)) return [];
+  const seen = new Set();
+  const result = [];
+  for (const rawCode of discounts.codes) {
+    const normalized = String(rawCode || "").trim().toUpperCase();
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  console.log("[acpCheckout.normalizeDiscountCodes] result", { codes: result });
+  return result;
+}
+
+function toMinorUnit(amountMajor) {
+  return Math.round((Number(amountMajor) || 0) * 100);
+}
+
+function fromMinorUnit(amountMinor) {
+  return (Number(amountMinor) || 0) / 100;
+}
+
+function buildAcrossAllocations(items, targetAmountMinor) {
+  if (!Array.isArray(items) || items.length === 0 || targetAmountMinor <= 0) return [];
+  const itemMinors = items.map((item) => toMinorUnit(item.line_total));
+  const subtotalMinor = itemMinors.reduce((sum, v) => sum + v, 0);
+  if (subtotalMinor <= 0) return [];
+
+  const allocations = itemMinors.map((itemMinor, index) => ({
+    path: `$.line_items[${index}]`,
+    amount: Math.floor((targetAmountMinor * itemMinor) / subtotalMinor),
+  }));
+
+  const allocated = allocations.reduce((sum, a) => sum + a.amount, 0);
+  const remainder = targetAmountMinor - allocated;
+  for (let i = 0; i < remainder; i += 1) {
+    allocations[i % allocations.length].amount += 1;
+  }
+
+  return allocations.filter((a) => a.amount > 0);
+}
+
+function getCouponByCode(code) {
+  return FIXED_COUPON_CATALOG[code] || null;
+}
+
+export function applyDiscounts({
+  resolvedItems,
+  shippingMajor = 0,
+  currency = "USD",
+  discounts,
+}) {
+  console.log("[acpCheckout.applyDiscounts] params", {
+    itemCount: resolvedItems?.length || 0,
+    shippingMajor,
+    currency,
+    discounts,
+  });
+  const codes = normalizeDiscountCodes(discounts);
+  const applied = [];
+  const rejected = [];
+  const messages = [];
+
+  const subtotalMinor = toMinorUnit(
+    (resolvedItems || []).reduce((sum, item) => sum + (item.line_total || 0), 0)
+  );
+  const shippingMinor = toMinorUnit(shippingMajor);
+  let runningDiscountMinor = 0;
+
+  codes.forEach((code, index) => {
+    console.log("[acpCheckout.applyDiscounts] evaluating code", {
+      code,
+      priority: index + 1,
+    });
+    const coupon = getCouponByCode(code);
+    if (!coupon) {
+      const reason = "discount_code_invalid";
+      rejected.push({
+        code,
+        reason,
+        message: "This discount code is invalid.",
+      });
+      messages.push(
+        createWarningMessage({
+          code: reason,
+          severity: "medium",
+          param: "$.discounts.codes",
+          content: `Discount code ${code} is invalid.`,
+        })
+      );
+      console.log("[acpCheckout.applyDiscounts] rejected", {
+        code,
+        reason,
+      });
+      return;
+    }
+
+    if (coupon.metadata?.expires_at && new Date(coupon.metadata.expires_at) < new Date()) {
+      const reason = "discount_code_expired";
+      rejected.push({
+        code,
+        reason,
+        message: `This discount code expired on ${new Date(
+          coupon.metadata.expires_at
+        ).toDateString()}`,
+      });
+      messages.push(
+        createWarningMessage({
+          code: reason,
+          severity: "medium",
+          param: "$.discounts.codes",
+          content: `Discount code ${code} has expired.`,
+        })
+      );
+      console.log("[acpCheckout.applyDiscounts] rejected", {
+        code,
+        reason,
+      });
+      return;
+    }
+
+    if (
+      typeof coupon.max_redemptions === "number" &&
+      typeof coupon.times_redeemed === "number" &&
+      coupon.times_redeemed >= coupon.max_redemptions
+    ) {
+      const reason = "discount_code_usage_limit_reached";
+      rejected.push({
+        code,
+        reason,
+        message: "This discount code has reached its usage limit.",
+      });
+      messages.push(
+        createWarningMessage({
+          code: reason,
+          severity: "medium",
+          param: "$.discounts.codes",
+          content: `Discount code ${code} usage limit reached.`,
+        })
+      );
+      console.log("[acpCheckout.applyDiscounts] rejected", {
+        code,
+        reason,
+      });
+      return;
+    }
+
+    let amountMinor = 0;
+    let method = "across";
+    let allocations = [];
+    const lowerMetaScope = String(coupon.metadata?.scope || "").toLowerCase();
+
+    if (typeof coupon.percent_off === "number") {
+      amountMinor = Math.floor((subtotalMinor * coupon.percent_off) / 100);
+      const maxAllowed = Math.max(0, subtotalMinor - runningDiscountMinor);
+      amountMinor = Math.max(0, Math.min(amountMinor, maxAllowed));
+      method = "across";
+      allocations = buildAcrossAllocations(resolvedItems, amountMinor);
+    } else if (typeof coupon.amount_off === "number") {
+      if (
+        coupon.currency &&
+        String(coupon.currency).toUpperCase() !== String(currency).toUpperCase()
+      ) {
+        const reason = "discount_code_invalid";
+        rejected.push({
+          code,
+          reason,
+          message: `Discount currency ${coupon.currency} does not match checkout currency ${currency}.`,
+        });
+        messages.push(
+          createWarningMessage({
+            code: reason,
+            severity: "medium",
+            param: "$.discounts.codes",
+            content: `Discount code ${code} currency mismatch.`,
+          })
+        );
+        console.log("[acpCheckout.applyDiscounts] rejected", {
+          code,
+          reason,
+        });
+        return;
+      }
+
+      if (lowerMetaScope === "shipping") {
+        amountMinor = Math.min(coupon.amount_off, shippingMinor);
+        method = "each";
+        allocations = amountMinor > 0 ? [{ path: "$.totals.shipping", amount: amountMinor }] : [];
+      } else {
+        const maxAllowed = Math.max(0, subtotalMinor - runningDiscountMinor);
+        amountMinor = Math.max(0, Math.min(coupon.amount_off, maxAllowed));
+        method = "across";
+        allocations = buildAcrossAllocations(resolvedItems, amountMinor);
+      }
+    }
+
+    if (amountMinor <= 0) {
+      const reason = "discount_code_minimum_not_met";
+      rejected.push({
+        code,
+        reason,
+        message: "This discount code cannot be applied to the current cart.",
+      });
+      messages.push(
+        createWarningMessage({
+          code: reason,
+          severity: "medium",
+          param: "$.discounts.codes",
+          content: `Discount code ${code} minimum not met.`,
+        })
+      );
+      console.log("[acpCheckout.applyDiscounts] rejected", {
+        code,
+        reason,
+      });
+      return;
+    }
+
+    runningDiscountMinor += amountMinor;
+
+    applied.push({
+      id: `applied_discount_${Date.now()}_${index + 1}`,
+      code,
+      coupon,
+      amount: amountMinor,
+      automatic: false,
+      start: new Date().toISOString(),
+      end: coupon.metadata?.expires_at || undefined,
+      method,
+      priority: index + 1,
+      allocations,
+    });
+    console.log("[acpCheckout.applyDiscounts] applied", {
+      code,
+      amountMinor,
+      method,
+      allocationCount: allocations.length,
+    });
+  });
+
+  const result = {
+    discounts: {
+      codes,
+      applied,
+      rejected,
+    },
+    discountTotalMinor: applied.reduce((sum, d) => sum + d.amount, 0),
+    messages,
+  };
+  console.log("[acpCheckout.applyDiscounts] result", {
+    codes: result.discounts.codes,
+    appliedCount: result.discounts.applied.length,
+    rejectedCount: result.discounts.rejected.length,
+    discountTotalMinor: result.discountTotalMinor,
+  });
+  return result;
+}
+
 /* -------------------------------------------
    Resolve Items + Pricing From MongoDB
 ------------------------------------------- */
@@ -165,24 +605,40 @@ export async function resolveItemsWithPricing(items) {
       error: "Invalid item id(s)",
       status: 400,
       messages: missingIds.map((id) => ({
-        code: "invalid_item",
-        level: "error",
-        text: `Item not found: ${id}`,
+        ...createErrorMessage({
+          code: "not_found",
+          severity: "high",
+          param: "$.items",
+          content: `Item not found: ${id}`,
+        }),
       })),
     };
   }
   // ❌ Stock check
   const outOfStock = [];
+  const warnings = [];
 
-  const resolvedItems = items.map((item) => {
+  const resolvedItems = items.map((item, index) => {
     const product = productMap.get(item.id);
 
     if ((product.stock ?? 0) < item.quantity) {
-      outOfStock.push({
-        code: "out_of_stock",
-        level: "error",
-        text: `${product.name} has only ${product.stock ?? 0} left`,
-      });
+      outOfStock.push(
+        createErrorMessage({
+          code: "out_of_stock",
+          severity: "medium",
+          param: "$.items",
+          content: `${product.name} has only ${product.stock ?? 0} left`,
+        })
+      );
+    } else if ((product.stock ?? 0) <= LOW_STOCK_WARNING_THRESHOLD) {
+      warnings.push(
+        createWarningMessage({
+          code: "low_stock",
+          severity: "medium",
+          param: `$.line_items[${index}]`,
+          content: `Only ${product.stock ?? 0} items left in stock`,
+        })
+      );
     }
 
     return {
@@ -203,29 +659,39 @@ export async function resolveItemsWithPricing(items) {
     };
   }
 
-  return { resolvedItems };
+  return { resolvedItems, messages: warnings };
 }
 
 /* -------------------------------------------
    Pricing Calculation
 ------------------------------------------- */
-export function buildPricing(resolvedItems, fulfillmentOption) {
+export function buildPricing(resolvedItems, fulfillmentOption, discountTotalMinor = 0) {
+  console.log("[acpCheckout.buildPricing] params", {
+    itemCount: resolvedItems?.length || 0,
+    fulfillmentOptionId: fulfillmentOption?.id,
+    shipping: fulfillmentOption?.amount || 0,
+    discountTotalMinor,
+  });
   const subtotal = resolvedItems.reduce((sum, item) => sum + item.line_total, 0);
 
   const tax = 0;
   const shipping = fulfillmentOption?.amount || 0;
+  const discount = fromMinorUnit(discountTotalMinor);
 
-  const total = subtotal + tax + shipping;
+  const total = Math.max(0, subtotal + tax + shipping - discount);
 
   const currency = resolvedItems[0]?.currency || "USD";
 
-  return {
+  const pricing = {
     subtotal,
+    discount,
     tax,
     shipping,
     total,
     currency,
   };
+  console.log("[acpCheckout.buildPricing] result", pricing);
+  return pricing;
 }
 
 /* -------------------------------------------
@@ -256,7 +722,7 @@ export function defaultFulfillmentOptions(currency) {
    Serialize Checkout Session
 ------------------------------------------- */
 export function serializeCheckoutSession(sessionDoc) {
-  return {
+  const payload = {
     id: sessionDoc.session_id,
     status: sessionDoc.status,
 
@@ -270,10 +736,23 @@ export function serializeCheckoutSession(sessionDoc) {
       sessionDoc.available_fulfillment_options || [],
 
     pricing: sessionDoc.pricing,
+    discounts: {
+      codes: sessionDoc.discounts?.codes || [],
+      applied: sessionDoc.discounts?.applied || [],
+      rejected: sessionDoc.discounts?.rejected || [],
+    },
 
     messages: sessionDoc.messages || [],
 
     created_at: sessionDoc.createdAt,
     updated_at: sessionDoc.updatedAt,
   };
+  console.log("[acpCheckout.serializeCheckoutSession] result", {
+    sessionId: payload.id,
+    status: payload.status,
+    codeCount: payload.discounts.codes.length,
+    appliedCount: payload.discounts.applied.length,
+    rejectedCount: payload.discounts.rejected.length,
+  });
+  return payload;
 }
