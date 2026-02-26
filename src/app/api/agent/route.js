@@ -21,7 +21,73 @@ let selectedProduct = null;
 // ✅ Load More Memory
 let lastQuery = null;
 let lastSkip = 0;
-let lastBudget = null;
+let lastMinPrice = null;
+let lastMaxPrice = null;
+
+function parseAmount(rawValue) {
+  const rawAmount = String(rawValue || "")
+    .replace(/,/g, "")
+    .trim();
+  if (!rawAmount) return null;
+  const isK = /k$/i.test(rawAmount);
+  const numeric = Number.parseFloat(rawAmount.replace(/k$/i, ""));
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return Math.round(isK ? numeric * 1000 : numeric);
+}
+
+function parsePriceRangeFromText(input) {
+  const text = String(input || "").toLowerCase();
+  let minPrice = null;
+  let maxPrice = null;
+
+  const betweenRegexes = [
+    /(?:between|from)\s*(?:rs\.?|inr|rupees|₹)?\s*([\d,]+(?:\.\d+)?k?)\s*(?:and|to|-)\s*(?:rs\.?|inr|rupees|₹)?\s*([\d,]+(?:\.\d+)?k?)/i,
+    /(?:rs\.?|inr|rupees|₹)?\s*([\d,]+(?:\.\d+)?k?)\s*(?:to|-)\s*(?:rs\.?|inr|rupees|₹)?\s*([\d,]+(?:\.\d+)?k?)/i,
+  ];
+  for (const regex of betweenRegexes) {
+    const match = text.match(regex);
+    if (!match?.[1] || !match?.[2]) continue;
+    const first = parseAmount(match[1]);
+    const second = parseAmount(match[2]);
+    if (!first || !second) continue;
+    minPrice = Math.min(first, second);
+    maxPrice = Math.max(first, second);
+    return { minPrice, maxPrice };
+  }
+
+  const minRegexes = [
+    /(?:above|over|greater than|more than|at least)\s*(?:rs\.?|inr|rupees|₹)?\s*([\d,]+(?:\.\d+)?k?)/i,
+    /(?:>=|>)\s*(?:rs\.?|inr|rupees|₹)?\s*([\d,]+(?:\.\d+)?k?)/i,
+  ];
+  for (const regex of minRegexes) {
+    const match = text.match(regex);
+    if (!match?.[1]) continue;
+    const parsed = parseAmount(match[1]);
+    if (!parsed) continue;
+    minPrice = parsed;
+    break;
+  }
+
+  const maxRegexes = [
+    /(?:under|below|less than|up to|upto|within)\s*(?:rs\.?|inr|rupees|₹)?\s*([\d,]+(?:\.\d+)?k?)/i,
+    /budget\s*(?:of|is|:)?\s*(?:rs\.?|inr|rupees|₹)?\s*([\d,]+(?:\.\d+)?k?)/i,
+    /(?:<=|<)\s*(?:rs\.?|inr|rupees|₹)?\s*([\d,]+(?:\.\d+)?k?)/i,
+  ];
+  for (const regex of maxRegexes) {
+    const match = text.match(regex);
+    if (!match?.[1]) continue;
+    const parsed = parseAmount(match[1]);
+    if (!parsed) continue;
+    maxPrice = parsed;
+    break;
+  }
+
+  if (minPrice && maxPrice && minPrice > maxPrice) {
+    return { minPrice: maxPrice, maxPrice: minPrice };
+  }
+
+  return { minPrice, maxPrice };
+}
 
 /* -----------------------------
    POST Agent Route
@@ -50,7 +116,7 @@ export async function POST(req) {
       const storeRes = await fetch(
         `${process.env.NEXT_PUBLIC_BASE_URL}/api/products?query=${encodeURIComponent(
           lastQuery
-        )}&skip=${lastSkip}${lastBudget !== null ? `&budget=${lastBudget}` : ""}`
+        )}&skip=${lastSkip}${lastMinPrice !== null ? `&minPrice=${lastMinPrice}` : ""}${lastMaxPrice !== null ? `&maxPrice=${lastMaxPrice}` : ""}`
       );
 
       const storeData = await storeRes.json();
@@ -214,12 +280,7 @@ Would you like to proceed to checkout? (Yes/No)`,
        ✅ STEP 3: Budget Query Detection
        Example: under 50000
     ----------------------------- */
-    let budget = null;
-    const budgetMatch = text.match(/under\s*\₹?(\d+)/);
-
-    if (budgetMatch) {
-      budget = parseInt(budgetMatch[1]);
-    }
+    const { minPrice, maxPrice } = parsePriceRangeFromText(message);
 
     /* -------------------------------------------------
        ✅ STEP 4: OpenAI Intent + Query Understanding
@@ -285,7 +346,9 @@ Return: {"intent":"product_search","query":"samsung","reply":""}
     // Keep exact user query for specific model-style searches (e.g. "Apple Mobile Model 9")
     const rawMessage = message.trim();
     const hasBudgetPhrase =
-      /\b(under|below|less than|upto|up to|within|budget)\b/i.test(rawMessage);
+      /\b(under|below|less than|upto|up to|within|budget|above|over|greater than|more than|between|from|to)\b/i.test(
+        rawMessage
+      );
     const looksLikeSpecificModel =
       /\bmodel\s*[a-z0-9-]*\d+[a-z0-9-]*\b/i.test(rawMessage) &&
       !hasBudgetPhrase;
@@ -308,7 +371,8 @@ Return: {"intent":"product_search","query":"samsung","reply":""}
     // Save query for Load More
     lastQuery = searchQuery;
     lastSkip = 0;
-    lastBudget = budget;
+    lastMinPrice = minPrice;
+    lastMaxPrice = maxPrice;
 
     // Call Store API Endpoint
     let storeUrl = `${process.env.NEXT_PUBLIC_BASE_URL}/api/products?query=${encodeURIComponent(
@@ -316,8 +380,11 @@ Return: {"intent":"product_search","query":"samsung","reply":""}
     )}&skip=0`;
 
     // Budget filter support
-    if (budget !== null) {
-      storeUrl += `&budget=${budget}`;
+    if (minPrice !== null) {
+      storeUrl += `&minPrice=${minPrice}`;
+    }
+    if (maxPrice !== null) {
+      storeUrl += `&maxPrice=${maxPrice}`;
     }
 
     const storeRes = await fetch(storeUrl);

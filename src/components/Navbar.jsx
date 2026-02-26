@@ -25,7 +25,7 @@ export default function Navbar() {
   return (
     <nav className="fixed-top navbar navbar-dark bg-dark px-4 d-flex justify-content-between">
       <Link href="/home" className="navbar-brand fw-bold">
-        🛍 RetailStore
+        🛍 Adra Store
       </Link>
 
       <div className="d-flex gap-2">

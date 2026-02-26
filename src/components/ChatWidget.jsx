@@ -1345,7 +1345,9 @@ ${itemsText}
               left: isDesktopMode ? "50%" : "auto",
               transform: isDesktopMode ? "translate(-50%, -50%)" : "none",
               width: isDesktopMode ? "90vw" : "370px",
-              height: isDesktopMode ? "90vh" : "520px",
+              height: isDesktopMode
+                ? "90vh"
+                : "min(520px, calc(100vh - 120px))",
               borderRadius: "15px",
               display: "flex",
               flexDirection: "column",
@@ -1356,7 +1358,7 @@ ${itemsText}
 
               {/* Left Side Title */}
               <div className="d-flex align-items-center">
-                🤖 Shopping Assistant
+                🤖 AdraAgent
               </div>
 
               {/* Right Side Buttons */}

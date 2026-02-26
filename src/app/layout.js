@@ -5,7 +5,7 @@ import ChatWidgetAuthGate from "../components/ChatWidgetAuthGate";
 import { CartProvider } from "../components/CartContext";
 
 export const metadata = {
-  title: "Retail ACP Demo",
+  title: "Adra Store",
 };
 
 export default function RootLayout({ children }) {
